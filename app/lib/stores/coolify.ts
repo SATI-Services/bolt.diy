@@ -36,6 +36,25 @@ export const coolifyConnection = atom<CoolifyConnection>(initialConnection);
 export const coolifySettings = atom<CoolifySettings>(initialSettings);
 export const isConnecting = atom<boolean>(false);
 
+// Auto-initialize connection on startup when env vars are configured
+if (typeof window !== 'undefined' && initialSettings.enabled && initialConnection.url && initialConnection.token && !initialConnection.connected) {
+  setTimeout(async () => {
+    try {
+      const result = await testConnection({ url: initialConnection.url, token: initialConnection.token });
+
+      if (result.ok) {
+        const conn = coolifyConnection.get();
+        const newState = { ...conn, connected: true };
+        coolifyConnection.set(newState);
+        localStorage.setItem('coolify_connection', JSON.stringify(newState));
+        console.log(`Coolify auto-connected (v${result.version})`);
+      }
+    } catch (error) {
+      console.warn('Coolify auto-connect failed:', error);
+    }
+  }, 500);
+}
+
 export const updateCoolifyConnection = (updates: Partial<CoolifyConnection>) => {
   const currentState = coolifyConnection.get();
   const newState = { ...currentState, ...updates };

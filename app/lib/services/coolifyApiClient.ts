@@ -7,6 +7,8 @@ interface CoolifyApiOptions {
   token: string;
 }
 
+const isBrowser = typeof window !== 'undefined';
+
 async function coolifyFetch(
   options: CoolifyApiOptions,
   endpoint: string,
@@ -14,21 +16,37 @@ async function coolifyFetch(
   body?: unknown,
 ): Promise<Response> {
   const { url, token } = options;
+
+  // In the browser, route through our server-side proxy to avoid CORS
+  if (isBrowser) {
+    const proxyResponse = await fetch('/api/coolify-proxy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ coolifyUrl: url, token, endpoint, method, body }),
+    });
+
+    // Unwrap the proxy response to look like a direct API response
+    const result = await proxyResponse.json();
+    const responseBody = typeof result.data === 'string' ? result.data : JSON.stringify(result.data);
+
+    return new Response(responseBody, {
+      status: result.status || proxyResponse.status,
+      headers: { 'Content-Type': typeof result.data === 'string' ? 'text/plain' : 'application/json' },
+    });
+  }
+
+  // Server-side: call Coolify API directly
   const apiUrl = `${url.replace(/\/+$/, '')}/api/v1${endpoint}`;
 
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${token}`,
-    'Content-Type': 'application/json',
-    Accept: 'application/json',
-  };
-
-  const response = await fetch(apiUrl, {
+  return fetch(apiUrl, {
     method,
-    headers,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
     body: body ? JSON.stringify(body) : undefined,
   });
-
-  return response;
 }
 
 export async function testConnection(options: CoolifyApiOptions): Promise<{ ok: boolean; version?: string }> {
