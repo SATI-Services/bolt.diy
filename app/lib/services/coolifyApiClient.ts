@@ -178,7 +178,7 @@ export async function updateAppDomain(
   fqdn: string,
 ): Promise<void> {
   const response = await coolifyFetch(options, `/applications/${uuid}`, 'PATCH', {
-    fqdn,
+    domains: fqdn,
   });
 
   if (!response.ok) {
