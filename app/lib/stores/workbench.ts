@@ -533,6 +533,26 @@ export class WorkbenchStore {
           }
         };
 
+        // When sidecar reports dev server ready, inject Coolify preview
+        syncService.onServerReady = (data: { port?: number }) => {
+          const containers = coolifyContainers.get();
+          const chatId = messageId;
+          const container = containers[chatId];
+
+          if (container?.domain) {
+            const currentPreviews = this.previews.get();
+            const coolifyUrl = container.domain.startsWith('http') ? container.domain : `https://${container.domain}`;
+
+            // Add Coolify preview if not already present
+            if (!currentPreviews.some((p) => p.baseUrl === coolifyUrl)) {
+              this.previews.set([
+                ...currentPreviews,
+                { port: data.port || 3000, ready: true, baseUrl: coolifyUrl },
+              ]);
+            }
+          }
+        };
+
         // Auto-provision container if enabled
         if (settings.autoProvision) {
           const chatId = messageId;
