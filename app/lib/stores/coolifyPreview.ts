@@ -27,6 +27,11 @@ function generateToken(): string {
   return Array.from(array, (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+// Generate a unique host port for the sidecar WS (range 10000-19999)
+function generateSidecarPort(): number {
+  return 10000 + Math.floor(Math.random() * 10000);
+}
+
 export async function provisionContainer(chatId: string): Promise<CoolifyContainerState | null> {
   const connection = coolifyConnection.get();
   const settings = coolifySettings.get();
@@ -43,21 +48,23 @@ export async function provisionContainer(chatId: string): Promise<CoolifyContain
   }
 
   const sidecarToken = generateToken();
+  const sidecarPort = generateSidecarPort();
   const appName = `bolt-preview-${chatId.slice(0, 8)}-${Date.now().toString(36)}`;
 
   try {
-    logger.debug(`Provisioning container for chat ${chatId}`);
+    logger.debug(`Provisioning container for chat ${chatId} (sidecar port: ${sidecarPort})`);
 
     const apiOptions = { url: connection.url, token: connection.token };
 
-    // Create the application
+    // Create the application with host port mapping for sidecar HTTP API
     const app = await coolifyApi.createApp(apiOptions, {
       serverUuid: connection.serverUuid,
       projectUuid: connection.projectUuid,
       environmentName: connection.environmentName,
       image: settings.sidecarImage,
       name: appName,
-      ports: '3000,9838',
+      ports: '3000,9838,9839',
+      portsMappings: `${sidecarPort}:9839`,
     });
 
     // Set sidecar token env var
@@ -65,10 +72,23 @@ export async function provisionContainer(chatId: string): Promise<CoolifyContain
       { key: 'SIDECAR_TOKEN', value: sidecarToken },
     ]);
 
+    // Set custom domain under our wildcard so Traefik routes it correctly
+    const customDomain = `https://${appName}.bolt.rdrt.org`;
+
+    try {
+      await coolifyApi.updateAppDomain(apiOptions, app.uuid, customDomain);
+    } catch (e) {
+      logger.warn('Failed to set custom domain, using Coolify default:', e);
+    }
+
+    // Sidecar HTTP API URL — accessed via server-side proxy
+    const serverHost = new URL(connection.url).hostname;
+    const sidecarUrl = `http://${serverHost}:${sidecarPort}`;
+
     const containerState: CoolifyContainerState = {
       appUuid: app.uuid,
-      domain: app.fqdn || `${appName}.preview.yourdomain.com`,
-      wsUrl: '',
+      domain: customDomain,
+      wsUrl: sidecarUrl, // reusing wsUrl field for sidecar HTTP URL
       sidecarToken,
       status: 'provisioning',
       chatId,
@@ -92,13 +112,10 @@ export async function provisionContainer(chatId: string): Promise<CoolifyContain
 
         if (appStatus.status === 'running') {
           const domain = appStatus.fqdn || containerState.domain;
-          // Derive WS URL from domain - replace http(s) with ws(s) and add sidecar port
-          const wsUrl = domain.replace(/^https?:\/\//, 'wss://').replace(/\/?$/, ':9838');
 
           const updatedState: CoolifyContainerState = {
             ...containerState,
             domain,
-            wsUrl,
             status: 'running',
             lastActivity: Date.now(),
           };

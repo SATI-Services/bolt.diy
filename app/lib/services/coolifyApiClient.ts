@@ -98,9 +98,10 @@ export async function createApp(
     image: string;
     name: string;
     ports: string;
+    portsMappings?: string;
   },
-): Promise<{ uuid: string; fqdn?: string }> {
-  const response = await coolifyFetch(options, '/applications', 'POST', {
+): Promise<{ uuid: string; domains?: string }> {
+  const body: Record<string, unknown> = {
     server_uuid: params.serverUuid,
     project_uuid: params.projectUuid,
     environment_name: params.environmentName,
@@ -108,7 +109,13 @@ export async function createApp(
     name: params.name,
     ports_exposes: params.ports,
     instant_deploy: true,
-  });
+  };
+
+  if (params.portsMappings) {
+    body.ports_mappings = params.portsMappings;
+  }
+
+  const response = await coolifyFetch(options, '/applications/dockerimage', 'POST', body);
 
   if (!response.ok) {
     const errorText = await response.text();

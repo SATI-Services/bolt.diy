@@ -557,8 +557,12 @@ export class WorkbenchStore {
         if (settings.autoProvision) {
           const chatId = messageId;
           const containers = coolifyContainers.get();
+          const existing = containers[chatId];
 
-          if (!containers[chatId]) {
+          if (existing && existing.status === 'running' && existing.wsUrl) {
+            // Reconnect to existing container
+            syncService.connect(existing.wsUrl, existing.sidecarToken);
+          } else if (!existing) {
             provisionContainer(chatId).then((container) => {
               if (container) {
                 syncService.connect(container.wsUrl, container.sidecarToken);

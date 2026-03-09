@@ -134,7 +134,7 @@ WORKDIR /app
 
 COPY server.mjs /sidecar/server.mjs
 
-EXPOSE 3000 9838
+EXPOSE 3000 9838 9839
 
 ENV SIDECAR_TOKEN=""
 
