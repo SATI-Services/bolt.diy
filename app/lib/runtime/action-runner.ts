@@ -255,19 +255,27 @@ export class ActionRunner {
       unreachable('Expected shell action');
     }
 
-    const shell = this.#shellTerminal();
-    await shell.ready();
-
-    if (!shell || !shell.terminal || !shell.process) {
-      unreachable('Shell terminal not found');
-    }
-
     // Pre-validate command for common issues
     const validationResult = await this.#validateShellCommand(action.content);
 
     if (validationResult.shouldModify && validationResult.modifiedCommand) {
       logger.debug(`Modified command: ${action.content} -> ${validationResult.modifiedCommand}`);
       action.content = validationResult.modifiedCommand;
+    }
+
+    // When Coolify is enabled, route commands exclusively to sidecar.
+    // WebContainer shell can hang on interactive prompts (e.g. npm create vite "Ok to proceed?").
+    if (this.coolifyEnabled) {
+      logger.debug(`[Coolify] Routing shell command to sidecar: ${action.content}`);
+      this.onShellExec?.(action.content);
+      return;
+    }
+
+    const shell = this.#shellTerminal();
+    await shell.ready();
+
+    if (!shell || !shell.terminal || !shell.process) {
+      unreachable('Shell terminal not found');
     }
 
     this.onShellExec?.(action.content);
@@ -279,21 +287,6 @@ export class ActionRunner {
     logger.debug(`${action.type} Shell Response: [exit code:${resp?.exitCode}]`);
 
     if (resp?.exitCode != 0) {
-      // When Coolify is enabled, WebContainer failures for non-JS commands are expected.
-      // The sidecar handles execution via onShellExec callback, so we don't throw.
-      if (this.coolifyEnabled) {
-        const output = resp?.output || '';
-        const isNonJsFailure =
-          output.includes('command not found') ||
-          output.includes('not found') ||
-          output.includes('No such file or directory');
-
-        if (isNonJsFailure) {
-          logger.debug(`[Coolify] WebContainer command failed (expected for non-JS): ${action.content}`);
-          return;
-        }
-      }
-
       const enhancedError = this.#createEnhancedShellError(action.content, resp?.exitCode, resp?.output);
       throw new ActionCommandError(enhancedError.title, enhancedError.details);
     }
@@ -304,12 +297,16 @@ export class ActionRunner {
       unreachable('Expected shell action');
     }
 
+    // When Coolify is enabled, route start commands exclusively to sidecar.
+    if (this.coolifyEnabled) {
+      logger.debug(`[Coolify] Routing start command to sidecar: ${action.content}`);
+      this.onShellExec?.(action.content);
+      return;
+    }
+
     if (!this.#shellTerminal) {
       unreachable('Shell terminal not found');
     }
-
-    // Send start command to Coolify sidecar as well
-    this.onShellExec?.(action.content);
 
     const shell = this.#shellTerminal();
     await shell.ready();
@@ -325,13 +322,6 @@ export class ActionRunner {
     logger.debug(`${action.type} Shell Response: [exit code:${resp?.exitCode}]`);
 
     if (resp?.exitCode != 0) {
-      // When Coolify is enabled, start command failures in WebContainer are expected
-      // for non-JS projects (e.g., `php artisan serve`). The sidecar handles it.
-      if (this.coolifyEnabled) {
-        logger.debug(`[Coolify] WebContainer start failed (sidecar handles it): ${action.content}`);
-        return resp;
-      }
-
       throw new ActionCommandError('Failed To Start Application', resp?.output || 'No Output Available');
     }
 
