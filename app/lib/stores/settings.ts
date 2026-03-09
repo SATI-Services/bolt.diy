@@ -118,7 +118,24 @@ const getInitialProviderSettings = (): ProviderSetting => {
   return initialSettings;
 };
 
-// Auto-enable providers that are configured on the server
+// Check if a provider has a client-side (BYOK) API key set in cookies
+const hasClientApiKey = (providerName: string): boolean => {
+  try {
+    const cookieStr = document.cookie;
+    const match = cookieStr.match(/(?:^|;\s*)apiKeys=([^;]*)/);
+
+    if (match) {
+      const keys = JSON.parse(decodeURIComponent(match[1]));
+      return !!(keys[providerName] && keys[providerName].trim().length > 0);
+    }
+  } catch {
+    // ignore parse errors
+  }
+
+  return false;
+};
+
+// Auto-enable providers with valid keys and auto-disable those without
 const autoEnableConfiguredProviders = async () => {
   if (!isBrowser) {
     return;
@@ -126,60 +143,81 @@ const autoEnableConfiguredProviders = async () => {
 
   try {
     const configuredProviders = await fetchConfiguredProviders();
-    const currentSettings = providersStore.get();
-    const savedSettings = localStorage.getItem(PROVIDER_SETTINGS_KEY);
+    const currentSettings = { ...providersStore.get() };
     const autoEnabledProviders = localStorage.getItem(AUTO_ENABLED_KEY);
-
-    // Track which providers were auto-enabled to avoid overriding user preferences
     const previouslyAutoEnabled = autoEnabledProviders ? JSON.parse(autoEnabledProviders) : [];
     const newlyAutoEnabled: string[] = [];
+    const autoDisabled: string[] = [];
 
     let hasChanges = false;
 
-    configuredProviders.forEach(({ name, isConfigured, configMethod }) => {
-      if (isConfigured && configMethod === 'environment' && LOCAL_PROVIDERS.includes(name)) {
-        const currentProvider = currentSettings[name];
+    // Build a map of server-configured providers
+    const serverConfigMap = new Map(configuredProviders.map((p) => [p.name, p]));
 
-        if (currentProvider) {
-          /*
-           * Only auto-enable if:
-           * 1. Provider is not already enabled, AND
-           * 2. Either we haven't saved settings yet (first time) OR provider was previously auto-enabled
-           */
-          const hasUserSettings = savedSettings !== null;
+    // Check every provider in the store
+    for (const [name, provider] of Object.entries(currentSettings) as [string, IProviderConfig][]) {
+      const serverInfo = serverConfigMap.get(name);
+      const hasServerKey = serverInfo?.isConfigured === true;
+      const hasClientKey = hasClientApiKey(name);
+      const hasAnyKey = hasServerKey || hasClientKey;
+
+      // Skip local providers that don't need API keys (they use baseUrl)
+      const isLocalProvider = LOCAL_PROVIDERS.includes(name);
+
+      if (isLocalProvider) {
+        // For local providers, only auto-enable if server has a valid baseUrl configured
+        if (hasServerKey && !provider.settings.enabled) {
           const wasAutoEnabled = previouslyAutoEnabled.includes(name);
-          const shouldAutoEnable = !currentProvider.settings.enabled && (!hasUserSettings || wasAutoEnabled);
+          const hasUserSettings = localStorage.getItem(PROVIDER_SETTINGS_KEY) !== null;
 
-          if (shouldAutoEnable) {
+          if (!hasUserSettings || wasAutoEnabled) {
             currentSettings[name] = {
-              ...currentProvider,
-              settings: {
-                ...currentProvider.settings,
-                enabled: true,
-              },
+              ...provider,
+              settings: { ...provider.settings, enabled: true },
             };
             newlyAutoEnabled.push(name);
             hasChanges = true;
           }
         }
+
+        continue;
       }
-    });
+
+      // For cloud providers: disable if no key at all, enable if key exists
+      if (!hasAnyKey && provider.settings.enabled) {
+        currentSettings[name] = {
+          ...provider,
+          settings: { ...provider.settings, enabled: false },
+        };
+        autoDisabled.push(name);
+        hasChanges = true;
+      } else if (hasAnyKey && !provider.settings.enabled) {
+        currentSettings[name] = {
+          ...provider,
+          settings: { ...provider.settings, enabled: true },
+        };
+        newlyAutoEnabled.push(name);
+        hasChanges = true;
+      }
+    }
 
     if (hasChanges) {
-      // Update the store
       providersStore.set(currentSettings);
-
-      // Save to localStorage
       localStorage.setItem(PROVIDER_SETTINGS_KEY, JSON.stringify(currentSettings));
 
-      // Update the auto-enabled providers list
       const allAutoEnabled = [...new Set([...previouslyAutoEnabled, ...newlyAutoEnabled])];
       localStorage.setItem(AUTO_ENABLED_KEY, JSON.stringify(allAutoEnabled));
 
-      console.log(`Auto-enabled providers: ${newlyAutoEnabled.join(', ')}`);
+      if (newlyAutoEnabled.length > 0) {
+        console.log(`Auto-enabled providers (key found): ${newlyAutoEnabled.join(', ')}`);
+      }
+
+      if (autoDisabled.length > 0) {
+        console.log(`Auto-disabled providers (no key): ${autoDisabled.join(', ')}`);
+      }
     }
   } catch (error) {
-    console.error('Error auto-enabling configured providers:', error);
+    console.error('Error auto-configuring providers:', error);
   }
 };
 
