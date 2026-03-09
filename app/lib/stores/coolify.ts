@@ -24,10 +24,10 @@ const initialConnection: CoolifyConnection = storedConnection
     };
 
 const defaultSettings: CoolifySettings = {
-  enabled: false,
+  enabled: !!(envUrl && envToken),
   autoProvision: true,
   containerTtl: 60,
-  sidecarImage: 'registry.yourdomain.com/preview-sidecar:latest',
+  sidecarImage: 'localhost:5000/preview-sidecar:latest',
 };
 
 const initialSettings: CoolifySettings = storedSettings ? JSON.parse(storedSettings) : defaultSettings;
