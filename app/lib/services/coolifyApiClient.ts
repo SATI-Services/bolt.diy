@@ -157,18 +157,17 @@ export async function getApp(
 export async function setEnvVars(
   options: CoolifyApiOptions,
   uuid: string,
-  vars: Array<{ key: string; value: string; is_build_time?: boolean }>,
+  vars: Array<{ key: string; value: string }>,
 ): Promise<void> {
   for (const envVar of vars) {
     const response = await coolifyFetch(options, `/applications/${uuid}/envs`, 'POST', {
       key: envVar.key,
       value: envVar.value,
-      is_build_time: envVar.is_build_time ?? false,
-      is_preview: false,
     });
 
     if (!response.ok) {
-      throw new Error(`Failed to set env var ${envVar.key}: ${response.statusText}`);
+      const errorText = await response.text();
+      throw new Error(`Failed to set env var ${envVar.key}: ${response.statusText} - ${errorText}`);
     }
   }
 }
