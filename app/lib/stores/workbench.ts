@@ -18,6 +18,9 @@ import { description } from '~/lib/persistence';
 import Cookies from 'js-cookie';
 import { createSampler } from '~/utils/sampler';
 import type { ActionAlert, DeployAlert, SupabaseAlert } from '~/types/actions';
+import { coolifySettings } from '~/lib/stores/coolify';
+import { coolifyContainers, provisionContainer } from '~/lib/stores/coolifyPreview';
+import { getCoolifyFileSyncService } from '~/lib/services/coolifyFileSyncService';
 
 const { saveAs } = fileSaver;
 
@@ -507,6 +510,43 @@ export class WorkbenchStore {
         },
       ),
     });
+
+    // Wire up Coolify file sync if enabled
+    const settings = coolifySettings.get();
+
+    if (settings.enabled) {
+      const artifact = this.#getArtifact(id);
+
+      if (artifact) {
+        const syncService = getCoolifyFileSyncService();
+
+        artifact.runner.onFileWrite = (filePath, content) => {
+          if (syncService.connected) {
+            syncService.writeFile(filePath, content);
+          }
+        };
+
+        artifact.runner.onShellExec = (command) => {
+          if (syncService.connected) {
+            syncService.exec(command);
+          }
+        };
+
+        // Auto-provision container if enabled
+        if (settings.autoProvision) {
+          const chatId = messageId;
+          const containers = coolifyContainers.get();
+
+          if (!containers[chatId]) {
+            provisionContainer(chatId).then((container) => {
+              if (container) {
+                syncService.connect(container.wsUrl, container.sidecarToken);
+              }
+            });
+          }
+        }
+      }
+    }
   }
 
   updateArtifact({ artifactId }: ArtifactCallbackData, state: Partial<ArtifactUpdateState>) {

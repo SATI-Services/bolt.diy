@@ -1,5 +1,5 @@
 import type { TabType } from './types';
-import { User, Settings, Bell, Star, Database, Cloud, Laptop, Github, Wrench, List } from 'lucide-react';
+import { User, Settings, Bell, Star, Database, Cloud, Laptop, Github, Wrench, List, Server } from 'lucide-react';
 
 // GitLab icon component
 const GitLabIcon = () => (
@@ -53,6 +53,7 @@ export const TAB_ICONS: Record<TabType, React.ComponentType<{ className?: string
   supabase: () => <SupabaseIcon />,
   'event-logs': List,
   mcp: Wrench,
+  coolify: Server,
 };
 
 export const TAB_LABELS: Record<TabType, string> = {
@@ -70,6 +71,7 @@ export const TAB_LABELS: Record<TabType, string> = {
   supabase: 'Supabase',
   'event-logs': 'Event Logs',
   mcp: 'MCP Servers',
+  coolify: 'Coolify',
 };
 
 export const TAB_DESCRIPTIONS: Record<TabType, string> = {
@@ -87,6 +89,7 @@ export const TAB_DESCRIPTIONS: Record<TabType, string> = {
   supabase: 'Setup Supabase database connection',
   'event-logs': 'View system events and logs',
   mcp: 'Configure MCP (Model Context Protocol) servers',
+  coolify: 'Self-hosted live preview with shareable URLs',
 };
 
 export const DEFAULT_TAB_CONFIG = [
@@ -103,6 +106,7 @@ export const DEFAULT_TAB_CONFIG = [
   { id: 'notifications', visible: true, window: 'user' as const, order: 9 },
   { id: 'event-logs', visible: true, window: 'user' as const, order: 10 },
   { id: 'mcp', visible: true, window: 'user' as const, order: 11 },
+  { id: 'coolify', visible: true, window: 'user' as const, order: 12 },
 
   // User Window Tabs (In dropdown, initially hidden)
 ];

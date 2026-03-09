@@ -72,6 +72,8 @@ export class ActionRunner {
   onAlert?: (alert: ActionAlert) => void;
   onSupabaseAlert?: (alert: SupabaseAlert) => void;
   onDeployAlert?: (alert: DeployAlert) => void;
+  onFileWrite?: (path: string, content: string) => void;
+  onShellExec?: (command: string) => void;
   buildOutput?: { path: string; exitCode: number; output: string };
 
   constructor(
@@ -267,6 +269,8 @@ export class ActionRunner {
       action.content = validationResult.modifiedCommand;
     }
 
+    this.onShellExec?.(action.content);
+
     const resp = await shell.executeCommand(this.runnerId.get(), action.content, () => {
       logger.debug(`[${action.type}]:Aborting Action\n\n`, action);
       action.abort();
@@ -333,6 +337,7 @@ export class ActionRunner {
     try {
       await webcontainer.fs.writeFile(relativePath, action.content);
       logger.debug(`File written ${relativePath}`);
+      this.onFileWrite?.(relativePath, action.content);
     } catch (error) {
       logger.error('Failed to write file\n\n', error);
     }
