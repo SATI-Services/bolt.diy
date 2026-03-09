@@ -15,6 +15,42 @@ if (!TOKEN) {
   process.exit(1);
 }
 
+// ---- Placeholder server on port 3000 for Coolify health checks ----
+// Coolify expects port 3000 to be listening; this placeholder keeps the
+// container marked as "healthy" until the real dev server takes over.
+
+const PLACEHOLDER_PORT = 3000;
+let placeholderServer = null;
+let placeholderClosed = false;
+
+function startPlaceholder() {
+  placeholderServer = http.createServer((_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end('<html><body style="display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;background:#1a1a2e;color:#e0e0e0"><h2>Waiting for dev server...</h2></body></html>');
+  });
+  placeholderServer.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.log(`[Sidecar] Port ${PLACEHOLDER_PORT} already in use, placeholder not needed`);
+      placeholderServer = null;
+      placeholderClosed = true;
+    }
+  });
+  placeholderServer.listen(PLACEHOLDER_PORT, '0.0.0.0', () => {
+    console.log(`[Sidecar] Placeholder health server on port ${PLACEHOLDER_PORT}`);
+  });
+}
+
+function closePlaceholder() {
+  if (placeholderServer && !placeholderClosed) {
+    console.log('[Sidecar] Closing placeholder to free port for dev server');
+    placeholderServer.close();
+    placeholderServer = null;
+    placeholderClosed = true;
+  }
+}
+
+startPlaceholder();
+
 // ---- Shared helpers ----
 
 function resolvePath(filePath) {
@@ -47,6 +83,9 @@ function handleDeleteFile(filePath) {
 }
 
 function execCommand(command) {
+  // Close placeholder before exec so the dev server can bind port 3000
+  closePlaceholder();
+
   return new Promise((resolve) => {
     const proc = spawn('sh', ['-c', command], {
       cwd: WORKDIR,
@@ -87,6 +126,9 @@ function checkPorts(ws) {
   if (serverReadyNotified) return;
 
   for (const port of WATCH_PORTS) {
+    // Skip port 3000 while our placeholder is still running
+    if (port === PLACEHOLDER_PORT && !placeholderClosed) continue;
+
     const server = net.createServer();
     server.once('error', () => {
       if (!serverReadyNotified) {
@@ -102,6 +144,9 @@ function checkPorts(ws) {
 }
 
 function handleExecWs(ws, command) {
+  // Close placeholder before exec so the dev server can bind port 3000
+  closePlaceholder();
+
   const proc = spawn('sh', ['-c', command], {
     cwd: WORKDIR,
     env: { ...process.env, HOME: WORKDIR },
@@ -292,12 +337,14 @@ httpServer.listen(HTTP_PORT, '0.0.0.0', () => {
 
 process.on('SIGTERM', () => {
   console.log('[Sidecar] Shutting down...');
+  closePlaceholder();
   httpServer.close();
   wss.close(() => process.exit(0));
 });
 
 process.on('SIGINT', () => {
   console.log('[Sidecar] Shutting down...');
+  closePlaceholder();
   httpServer.close();
   wss.close(() => process.exit(0));
 });

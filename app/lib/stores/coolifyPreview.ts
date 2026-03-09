@@ -102,7 +102,7 @@ export async function provisionContainer(chatId: string): Promise<CoolifyContain
     coolifyContainers.setKey(chatId, containerState);
     persistContainers();
 
-    // Poll until running
+    // Poll until running — check both Coolify status and sidecar reachability
     const maxPolls = 30;
     let polls = 0;
 
@@ -112,8 +112,32 @@ export async function provisionContainer(chatId: string): Promise<CoolifyContain
 
       try {
         const appStatus = await coolifyApi.getApp(apiOptions, app.uuid);
+        const status = appStatus.status || '';
 
-        if (appStatus.status.startsWith('running')) {
+        // Accept running (any health) or check sidecar directly if status is ambiguous
+        const isRunning = status.startsWith('running');
+        let sidecarReachable = false;
+
+        if (!isRunning) {
+          // Try reaching sidecar directly — container may be up even if Coolify reports unhealthy
+          try {
+            const healthResp = await fetch('/api/sidecar-proxy', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                sidecarUrl: containerState.wsUrl,
+                token: containerState.sidecarToken,
+                endpoint: '/health',
+                method: 'GET',
+              }),
+            });
+            sidecarReachable = healthResp.ok;
+          } catch {
+            // ignore
+          }
+        }
+
+        if (isRunning || sidecarReachable) {
           const domain = appStatus.fqdn || containerState.domain;
 
           const updatedState: CoolifyContainerState = {
@@ -126,11 +150,13 @@ export async function provisionContainer(chatId: string): Promise<CoolifyContain
           coolifyContainers.setKey(chatId, updatedState);
           persistContainers();
 
-          logger.debug(`Container running for chat ${chatId}: ${domain}`);
+          logger.debug(`Container running for chat ${chatId}: ${domain} (coolify: ${status}, sidecar: ${sidecarReachable})`);
           toast.success('Coolify preview container is ready');
 
           return updatedState;
         }
+
+        logger.debug(`Poll ${polls}/${maxPolls}: status=${status}`);
       } catch (error) {
         logger.error('Error polling container status:', error);
       }
