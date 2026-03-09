@@ -134,7 +134,11 @@ function checkPorts(ws) {
       if (!serverReadyNotified) {
         serverReadyNotified = true;
         detectedPort = port;
-        sendJson(ws, { type: 'server_ready', port });
+
+        if (ws) {
+          sendJson(ws, { type: 'server_ready', port });
+        }
+
         console.log(`[Sidecar] Dev server detected on port ${port}`);
       }
     });
@@ -142,6 +146,10 @@ function checkPorts(ws) {
     server.listen(port, '127.0.0.1');
   }
 }
+
+// Standalone port detection interval (works without WS clients)
+const portCheckInterval = setInterval(() => checkPorts(null), 2000);
+if (portCheckInterval.unref) portCheckInterval.unref();
 
 function handleExecWs(ws, command) {
   // Close placeholder before exec so the dev server can bind port 3000

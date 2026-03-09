@@ -561,10 +561,12 @@ export class WorkbenchStore {
           if (existing && existing.status === 'running' && existing.wsUrl) {
             // Reconnect to existing container
             syncService.connect(existing.wsUrl, existing.sidecarToken);
+            this.#injectCoolifyPreview(existing.domain);
           } else if (!existing) {
             provisionContainer(chatId).then((container) => {
               if (container) {
                 syncService.connect(container.wsUrl, container.sidecarToken);
+                this.#injectCoolifyPreview(container.domain);
               }
             });
           }
@@ -667,6 +669,18 @@ export class WorkbenchStore {
   actionStreamSampler = createSampler(async (data: ActionCallbackData, isStreaming: boolean = false) => {
     return await this._runAction(data, isStreaming);
   }, 100); // TODO: remove this magic number to have it configurable
+
+  #injectCoolifyPreview(domain: string) {
+    const coolifyUrl = domain.startsWith('http') ? domain : `https://${domain}`;
+    const currentPreviews = this.previews.get();
+
+    if (!currentPreviews.some((p) => p.baseUrl === coolifyUrl)) {
+      this.previews.set([
+        ...currentPreviews,
+        { port: 3000, ready: true, baseUrl: coolifyUrl },
+      ]);
+    }
+  }
 
   #getArtifact(id: string) {
     const artifacts = this.artifacts.get();
