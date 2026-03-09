@@ -518,6 +518,7 @@ export class WorkbenchStore {
       const artifact = this.#getArtifact(id);
 
       if (artifact) {
+        artifact.runner.coolifyEnabled = true;
         const syncService = getCoolifyFileSyncService();
 
         artifact.runner.onFileWrite = (filePath, content) => {

@@ -124,7 +124,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- Node.js global tools ----
-RUN npm install -g ws pnpm yarn typescript tsx vite \
+RUN npm install -g --force ws pnpm typescript tsx vite \
+    && corepack enable \
     && curl -fsSL https://bun.sh/install | bash \
     && ln -sf /root/.bun/bin/bun /usr/local/bin/bun
 
