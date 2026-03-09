@@ -8,6 +8,8 @@ import { expoUrlAtom } from '~/lib/stores/qrCodeStore';
 import { ExpoQrModal } from '~/components/workbench/ExpoQrModal';
 import type { ElementInfo } from './Inspector';
 import { CoolifyShareButton } from './CoolifyShareButton';
+import { coolifySettings } from '~/lib/stores/coolify';
+import { coolifyContainers } from '~/lib/stores/coolifyPreview';
 
 type ResizeSide = 'left' | 'right' | null;
 
@@ -90,6 +92,17 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
   const [showDeviceFrameInPreview, setShowDeviceFrameInPreview] = useState(false);
   const expoUrl = useStore(expoUrlAtom);
   const [isExpoQrModalOpen, setIsExpoQrModalOpen] = useState(false);
+  const coolifySettingsValue = useStore(coolifySettings);
+  const coolifyContainersValue = useStore(coolifyContainers);
+
+  // Determine if Coolify is provisioning a container
+  const isCoolifyProvisioning =
+    coolifySettingsValue.enabled &&
+    coolifySettingsValue.autoProvision &&
+    !activePreview &&
+    Object.values(coolifyContainersValue).some(
+      (c: any) => c.status === 'provisioning' || c.status === 'running',
+    );
 
   useEffect(() => {
     if (!activePreview) {
@@ -1012,6 +1025,16 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
                 containerRef={iframeRef}
               />
             </>
+          ) : isCoolifyProvisioning ? (
+            <div className="flex flex-col gap-4 w-full h-full justify-center items-center bg-bolt-elements-background-depth-1 text-bolt-elements-textPrimary">
+              <div className="i-svg-spinners:90-ring-with-bg text-bolt-elements-loader-progress text-3xl" />
+              <div className="text-center">
+                <p className="text-lg font-medium">Waiting for preview container...</p>
+                <p className="text-sm text-bolt-elements-textSecondary mt-1">
+                  Provisioning Coolify container. This may take a minute.
+                </p>
+              </div>
+            </div>
           ) : (
             <div className="flex w-full h-full justify-center items-center bg-bolt-elements-background-depth-1 text-bolt-elements-textPrimary">
               No preview available
