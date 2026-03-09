@@ -20,10 +20,15 @@ async function coolifyProxyAction({ request }: ActionFunctionArgs) {
       Accept: 'application/json',
     };
 
+    const requestBody = body ? JSON.stringify(body) : undefined;
+
+    console.log('[coolify-proxy] →', method || 'GET', apiUrl);
+    console.log('[coolify-proxy] body:', requestBody);
+
     const response = await fetch(apiUrl, {
       method: method || 'GET',
       headers,
-      body: body ? JSON.stringify(body) : undefined,
+      body: requestBody,
     });
 
     const contentType = response.headers.get('content-type') || '';
@@ -33,6 +38,10 @@ async function coolifyProxyAction({ request }: ActionFunctionArgs) {
       data = await response.json();
     } else {
       data = await response.text();
+    }
+
+    if (response.status >= 400) {
+      console.log('[coolify-proxy] ← ERROR', response.status, JSON.stringify(data));
     }
 
     return json({ status: response.status, data }, { status: response.status >= 400 ? response.status : 200 });
