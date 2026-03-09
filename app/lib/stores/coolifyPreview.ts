@@ -110,7 +110,7 @@ export async function provisionContainer(chatId: string): Promise<CoolifyContain
       try {
         const appStatus = await coolifyApi.getApp(apiOptions, app.uuid);
 
-        if (appStatus.status === 'running') {
+        if (appStatus.status.startsWith('running')) {
           const domain = appStatus.fqdn || containerState.domain;
 
           const updatedState: CoolifyContainerState = {
