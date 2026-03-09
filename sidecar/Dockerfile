@@ -121,10 +121,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     default-mysql-client \
     postgresql-client \
     redis-tools \
-    && rm -rf /var/lists/apt/lists/*
+    && rm -rf /var/lib/apt/lists/*
 
 # ---- Node.js global tools ----
-RUN npm install -g ws pnpm yarn bun typescript tsx vite
+RUN npm install -g ws pnpm yarn typescript tsx vite \
+    && curl -fsSL https://bun.sh/install | bash \
+    && ln -sf /root/.bun/bin/bun /usr/local/bin/bun
 
 # ---- Sidecar server ----
 WORKDIR /app
