@@ -27,7 +27,7 @@ const defaultSettings: CoolifySettings = {
   enabled: !!(envUrl && envToken),
   autoProvision: true,
   containerTtl: 60,
-  sidecarImage: 'localhost:5000/preview-sidecar:latest',
+  sidecarImage: '10.0.0.1:5000/preview-sidecar:latest',
 };
 
 const initialSettings: CoolifySettings = storedSettings ? JSON.parse(storedSettings) : defaultSettings;
