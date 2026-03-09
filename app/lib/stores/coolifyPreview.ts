@@ -81,7 +81,14 @@ export async function provisionContainer(chatId: string): Promise<CoolifyContain
       logger.warn('Failed to set custom domain, using Coolify default:', e);
     }
 
-    // Now start the app (env vars and domain are set)
+    // Patch Traefik labels to add CORP headers for iframe embedding
+    try {
+      await coolifyApi.patchCoolifyLabelsForCORP(apiOptions, app.uuid);
+    } catch (e) {
+      logger.warn('Failed to patch CORP labels:', e);
+    }
+
+    // Now start the app (env vars, domain, and labels are set)
     await coolifyApi.startApp(apiOptions, app.uuid);
 
     // Sidecar HTTP API URL — accessed via server-side proxy

@@ -144,7 +144,7 @@ export async function startApp(options: CoolifyApiOptions, uuid: string): Promis
 export async function getApp(
   options: CoolifyApiOptions,
   uuid: string,
-): Promise<{ uuid: string; status: string; fqdn?: string; ports_mappings?: string }> {
+): Promise<{ uuid: string; status: string; fqdn?: string; ports_mappings?: string; custom_labels?: string }> {
   const response = await coolifyFetch(options, `/applications/${uuid}`);
 
   if (!response.ok) {
@@ -184,4 +184,61 @@ export async function updateAppDomain(
   if (!response.ok) {
     throw new Error(`Failed to update app domain: ${response.statusText}`);
   }
+}
+
+export async function setCustomLabels(
+  options: CoolifyApiOptions,
+  uuid: string,
+  labels: string,
+): Promise<void> {
+  const response = await coolifyFetch(options, `/applications/${uuid}`, 'PATCH', {
+    custom_labels: btoa(labels),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to set custom labels: ${response.statusText}`);
+  }
+}
+
+/**
+ * After setting a domain, Coolify auto-generates Traefik labels.
+ * This fetches those labels and patches them to add the cors-embed@file middleware,
+ * which injects Cross-Origin-Resource-Policy: cross-origin so the preview
+ * can be embedded in an iframe on a COEP-enabled page (bolt.rdrt.org).
+ */
+export async function patchCoolifyLabelsForCORP(
+  options: CoolifyApiOptions,
+  uuid: string,
+): Promise<void> {
+  // Fetch the current app to get auto-generated custom_labels
+  const app = await getApp(options, uuid);
+  const appData = app as Record<string, unknown>;
+  const encodedLabels = appData.custom_labels as string | undefined;
+
+  if (!encodedLabels) {
+    logger.warn('No custom_labels found on app, skipping CORP patch');
+    return;
+  }
+
+  let labels: string;
+
+  try {
+    labels = atob(encodedLabels);
+  } catch {
+    // Labels might not be base64 encoded
+    labels = encodedLabels;
+  }
+
+  // Find the HTTPS router middleware line and add cors-embed@file
+  const patchedLabels = labels.replace(
+    /^(traefik\.http\.routers\.https-0-[^.]+\.middlewares=)(.*)$/m,
+    '$1$2,cors-embed@file',
+  );
+
+  if (patchedLabels === labels) {
+    logger.warn('Could not find HTTPS middleware line to patch');
+    return;
+  }
+
+  await setCustomLabels(options, uuid, patchedLabels);
 }
