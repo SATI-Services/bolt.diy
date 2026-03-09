@@ -7,6 +7,7 @@ import { ScreenshotSelector } from './ScreenshotSelector';
 import { expoUrlAtom } from '~/lib/stores/qrCodeStore';
 import { ExpoQrModal } from '~/components/workbench/ExpoQrModal';
 import type { ElementInfo } from './Inspector';
+import { CoolifyShareButton } from './CoolifyShareButton';
 
 type ResizeSide = 'left' | 'right' | null;
 
@@ -747,6 +748,7 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
             }
             title={isInspectorMode ? 'Disable Element Inspector' : 'Enable Element Inspector'}
           />
+          <CoolifyShareButton />
           <IconButton
             icon={isFullscreen ? 'i-ph:arrows-in' : 'i-ph:arrows-out'}
             onClick={toggleFullscreen}

@@ -29,6 +29,7 @@ import NetlifyTab from '~/components/@settings/tabs/netlify/NetlifyTab';
 import CloudProvidersTab from '~/components/@settings/tabs/providers/cloud/CloudProvidersTab';
 import LocalProvidersTab from '~/components/@settings/tabs/providers/local/LocalProvidersTab';
 import McpTab from '~/components/@settings/tabs/mcp/McpTab';
+import CoolifyTab from '~/components/@settings/tabs/coolify/CoolifyTab';
 
 interface ControlPanelProps {
   open: boolean;
@@ -151,6 +152,8 @@ export const ControlPanel = ({ open, onClose }: ControlPanelProps) => {
         return <EventLogsTab />;
       case 'mcp':
         return <McpTab />;
+      case 'coolify':
+        return <CoolifyTab />;
 
       default:
         return null;
@@ -168,6 +171,7 @@ export const ControlPanel = ({ open, onClose }: ControlPanelProps) => {
       case 'supabase':
       case 'vercel':
       case 'netlify':
+      case 'coolify':
         return hasConnectionIssues;
       default:
         return false;
@@ -185,6 +189,7 @@ export const ControlPanel = ({ open, onClose }: ControlPanelProps) => {
       case 'supabase':
       case 'vercel':
       case 'netlify':
+      case 'coolify':
         return currentIssue === 'disconnected'
           ? 'Connection lost'
           : currentIssue === 'high-latency'
@@ -213,6 +218,7 @@ export const ControlPanel = ({ open, onClose }: ControlPanelProps) => {
       case 'supabase':
       case 'vercel':
       case 'netlify':
+      case 'coolify':
         acknowledgeIssue();
         break;
     }
