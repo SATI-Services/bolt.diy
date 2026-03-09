@@ -19,6 +19,7 @@ export class CoolifyFileSyncService {
   #batchQueue: Array<{ type: 'write_file' | 'mkdir' | 'delete_file'; path: string; content?: string }> = [];
   #batchTimeout: ReturnType<typeof setTimeout> | null = null;
   #batchDelay: number = 50;
+  #pendingOps: Array<{ type: 'write' | 'exec'; path?: string; content?: string; command?: string }> = [];
 
   get connected(): boolean {
     return this.#connected;
@@ -43,6 +44,9 @@ export class CoolifyFileSyncService {
       if (health) {
         this.#connected = true;
         logger.debug('Connected to sidecar HTTP API');
+
+        // Flush any operations that were queued while waiting for container
+        await this.#flushPendingOps();
 
         // Start health check polling (also checks for server_ready)
         this.#startHealthCheck();
@@ -105,6 +109,11 @@ export class CoolifyFileSyncService {
   }
 
   writeFile(filePath: string, content: string) {
+    if (!this.#connected) {
+      this.#pendingOps.push({ type: 'write', path: filePath, content });
+      return;
+    }
+
     this.#queueBatchOp({ type: 'write_file', path: filePath, content });
   }
 
@@ -161,6 +170,11 @@ export class CoolifyFileSyncService {
   }
 
   async exec(command: string): Promise<{ exitCode: number; output: string }> {
+    if (!this.#connected) {
+      this.#pendingOps.push({ type: 'exec', command });
+      return { exitCode: 0, output: 'Queued for sidecar' };
+    }
+
     try {
       const result = (await this.#sidecarFetch('/exec', 'POST', { command })) as {
         exitCode: number;
@@ -171,6 +185,33 @@ export class CoolifyFileSyncService {
       logger.error('Exec failed:', error);
       return { exitCode: -1, output: `Sidecar exec error: ${error}` };
     }
+  }
+
+  async #flushPendingOps() {
+    if (this.#pendingOps.length === 0) {
+      return;
+    }
+
+    const ops = [...this.#pendingOps];
+    this.#pendingOps = [];
+    logger.debug(`Flushing ${ops.length} pending operations to sidecar`);
+
+    for (const op of ops) {
+      try {
+        if (op.type === 'write' && op.path) {
+          this.#queueBatchOp({ type: 'write_file', path: op.path, content: op.content });
+        } else if (op.type === 'exec' && op.command) {
+          // Flush batch before exec to ensure files are written first
+          await this.#flushBatch();
+          await this.#sidecarFetch('/exec', 'POST', { command: op.command });
+        }
+      } catch (error) {
+        logger.error('Failed to flush pending op:', error);
+      }
+    }
+
+    // Final flush for any remaining batched writes
+    await this.#flushBatch();
   }
 
   disconnect() {

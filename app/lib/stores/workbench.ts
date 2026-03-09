@@ -522,15 +522,11 @@ export class WorkbenchStore {
         const syncService = getCoolifyFileSyncService();
 
         artifact.runner.onFileWrite = (filePath, content) => {
-          if (syncService.connected) {
-            syncService.writeFile(filePath, content);
-          }
+          syncService.writeFile(filePath, content);
         };
 
         artifact.runner.onShellExec = (command) => {
-          if (syncService.connected) {
-            syncService.exec(command);
-          }
+          syncService.exec(command);
         };
 
         // When sidecar reports dev server ready, inject Coolify preview
