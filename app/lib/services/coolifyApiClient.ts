@@ -144,7 +144,7 @@ export async function startApp(options: CoolifyApiOptions, uuid: string): Promis
 export async function getApp(
   options: CoolifyApiOptions,
   uuid: string,
-): Promise<{ uuid: string; status: string; fqdn?: string }> {
+): Promise<{ uuid: string; status: string; fqdn?: string; ports_mappings?: string }> {
   const response = await coolifyFetch(options, `/applications/${uuid}`);
 
   if (!response.ok) {

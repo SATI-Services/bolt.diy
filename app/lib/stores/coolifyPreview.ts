@@ -114,6 +114,18 @@ export async function provisionContainer(chatId: string): Promise<CoolifyContain
         const appStatus = await coolifyApi.getApp(apiOptions, app.uuid);
         const status = appStatus.status || '';
 
+        // Determine actual sidecar URL from Coolify's port mapping
+        let actualSidecarUrl = containerState.wsUrl;
+
+        if (appStatus.ports_mappings) {
+          const mapping = appStatus.ports_mappings.split(',')[0]; // e.g. "19924:9839"
+          const actualHostPort = mapping?.split(':')[0];
+
+          if (actualHostPort) {
+            actualSidecarUrl = `http://${serverHost}:${actualHostPort}`;
+          }
+        }
+
         // Accept running (any health) or check sidecar directly if status is ambiguous
         const isRunning = status.startsWith('running');
         let sidecarReachable = false;
@@ -125,7 +137,7 @@ export async function provisionContainer(chatId: string): Promise<CoolifyContain
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
-                sidecarUrl: containerState.wsUrl,
+                sidecarUrl: actualSidecarUrl,
                 token: containerState.sidecarToken,
                 endpoint: '/health',
                 method: 'GET',
@@ -143,6 +155,7 @@ export async function provisionContainer(chatId: string): Promise<CoolifyContain
           const updatedState: CoolifyContainerState = {
             ...containerState,
             domain,
+            wsUrl: actualSidecarUrl,
             status: 'running',
             lastActivity: Date.now(),
           };
@@ -150,7 +163,7 @@ export async function provisionContainer(chatId: string): Promise<CoolifyContain
           coolifyContainers.setKey(chatId, updatedState);
           persistContainers();
 
-          logger.debug(`Container running for chat ${chatId}: ${domain} (coolify: ${status}, sidecar: ${sidecarReachable})`);
+          logger.debug(`Container running for chat ${chatId}: ${domain} (coolify: ${status}, sidecar: ${actualSidecarUrl})`);
           toast.success('Coolify preview container is ready');
 
           return updatedState;
