@@ -522,7 +522,10 @@ export class WorkbenchStore {
         const syncService = getCoolifyFileSyncService();
 
         artifact.runner.onFileWrite = (filePath, content) => {
-          syncService.writeFile(filePath, content);
+          // Normalize path: strip leading ../ segments to get a clean relative path
+          // WebContainer paths may be relative to a different workdir (e.g. ../../index.html)
+          const normalizedPath = filePath.replace(/^(\.\.\/)+/, '');
+          syncService.writeFile(normalizedPath, content);
         };
 
         artifact.runner.onShellExec = (command) => {
