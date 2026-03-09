@@ -67,7 +67,7 @@ export async function provisionContainer(chatId: string): Promise<CoolifyContain
       portsMappings: `${sidecarPort}:9839`,
     });
 
-    // Set sidecar token env var
+    // Set sidecar token env var BEFORE starting the app
     await coolifyApi.setEnvVars(apiOptions, app.uuid, [
       { key: 'SIDECAR_TOKEN', value: sidecarToken },
     ]);
@@ -80,6 +80,9 @@ export async function provisionContainer(chatId: string): Promise<CoolifyContain
     } catch (e) {
       logger.warn('Failed to set custom domain, using Coolify default:', e);
     }
+
+    // Now start the app (env vars and domain are set)
+    await coolifyApi.startApp(apiOptions, app.uuid);
 
     // Sidecar HTTP API URL — accessed via server-side proxy
     const serverHost = new URL(connection.url).hostname;

@@ -108,7 +108,7 @@ export async function createApp(
     docker_registry_image_name: params.image,
     name: params.name,
     ports_exposes: params.ports,
-    instant_deploy: true,
+    instant_deploy: false,
   };
 
   if (params.portsMappings) {
