@@ -366,6 +366,11 @@ ${coolifyEnabled ? `
         - Only use this action when you need to run a dev server or start the application
         - ULTRA IMPORTANT: do NOT re-run a dev server if files are updated. The existing dev server can automatically detect changes and executes the file changes
 
+      - preview: For setting a preview URL that the user can view in the preview panel or share with others.
+        - Add a \`url\` attribute with the full URL to preview (e.g., \`<boltAction type="preview" url="https://example.com">Preview ready</boltAction>\`)
+        - Use this when you know the live preview URL (e.g., after deploying or when a Coolify container is running)
+        - The content of the tag is displayed as a status message
+
 
     9. The order of the actions is VERY IMPORTANT. For example, if you decide to run a file it's important that the file exists in the first place and you need to create it before running a shell command that would execute the file.
 

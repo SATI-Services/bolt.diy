@@ -1,4 +1,4 @@
-import type { ActionType, BoltAction, BoltActionData, FileAction, ShellAction, SupabaseAction } from '~/types/actions';
+import type { ActionType, BoltAction, BoltActionData, FileAction, PreviewAction, ShellAction, SupabaseAction } from '~/types/actions';
 import type { BoltArtifactData } from '~/types/artifact';
 import { createScopedLogger } from '~/utils/logger';
 import { unreachable } from '~/utils/unreachable';
@@ -373,7 +373,15 @@ export class StreamingMessageParser {
       }
 
       (actionAttributes as FileAction).filePath = filePath;
-    } else if (!['shell', 'start'].includes(actionType)) {
+    } else if (actionType === 'preview') {
+      const url = this.#extractAttribute(actionTag, 'url') as string;
+
+      if (!url) {
+        logger.warn('Preview action requires a url attribute');
+      }
+
+      (actionAttributes as unknown as PreviewAction).url = url;
+    } else if (!['shell', 'start', 'preview'].includes(actionType)) {
       logger.warn(`Unknown action type '${actionType}'`);
     }
 

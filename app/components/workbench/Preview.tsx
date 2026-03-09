@@ -95,6 +95,8 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
   const coolifySettingsValue = useStore(coolifySettings);
   const coolifyContainersValue = useStore(coolifyContainers);
 
+  const [coolifyProbing, setCoolifyProbing] = useState(false);
+
   // Determine if Coolify is provisioning a container
   const isCoolifyProvisioning =
     coolifySettingsValue.enabled &&
@@ -104,18 +106,65 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
       (c: any) => c.status === 'provisioning' || c.status === 'running',
     );
 
+  // Check if a URL is a Coolify preview URL
+  const isCoolifyUrl = useCallback((url: string) => {
+    return url.includes('bolt-preview-') && url.includes('.bolt.rdrt.org');
+  }, []);
+
   useEffect(() => {
     if (!activePreview) {
       setIframeUrl(undefined);
       setDisplayPath('/');
+      setCoolifyProbing(false);
 
       return;
     }
 
     const { baseUrl } = activePreview;
-    setIframeUrl(baseUrl);
     setDisplayPath('/');
-  }, [activePreview]);
+
+    // For Coolify preview URLs, probe until reachable before setting iframe src
+    if (isCoolifyUrl(baseUrl)) {
+      setCoolifyProbing(true);
+
+      let cancelled = false;
+      let attempt = 0;
+
+      const probe = async () => {
+        while (!cancelled && attempt < 30) {
+          try {
+            const resp = await fetch(baseUrl, { method: 'HEAD', mode: 'no-cors' });
+
+            // mode: no-cors returns opaque response (status 0) on success
+            // A network error (cert invalid, connection refused) throws
+            if (!cancelled) {
+              setCoolifyProbing(false);
+              setIframeUrl(baseUrl);
+            }
+
+            return;
+          } catch {
+            attempt++;
+            await new Promise((r) => setTimeout(r, 3000));
+          }
+        }
+
+        // After max attempts, try loading anyway
+        if (!cancelled) {
+          setCoolifyProbing(false);
+          setIframeUrl(baseUrl);
+        }
+      };
+
+      probe();
+
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setIframeUrl(baseUrl);
+  }, [activePreview, isCoolifyUrl]);
 
   const findMinPortIndex = useCallback(
     (minIndex: number, preview: { port: number }, index: number, array: { port: number }[]) => {
@@ -925,7 +974,17 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
             alignItems: 'center',
           }}
         >
-          {activePreview ? (
+          {activePreview && coolifyProbing ? (
+            <div className="flex flex-col gap-4 w-full h-full justify-center items-center bg-bolt-elements-background-depth-1 text-bolt-elements-textPrimary">
+              <div className="i-svg-spinners:90-ring-with-bg text-bolt-elements-loader-progress text-3xl" />
+              <div className="text-center">
+                <p className="text-lg font-medium">Connecting to preview...</p>
+                <p className="text-sm text-bolt-elements-textSecondary mt-1">
+                  Waiting for SSL certificate and container to be ready.
+                </p>
+              </div>
+            </div>
+          ) : activePreview ? (
             <>
               {isDeviceModeOn && showDeviceFrameInPreview ? (
                 <div

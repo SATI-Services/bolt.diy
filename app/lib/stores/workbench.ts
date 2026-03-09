@@ -532,6 +532,10 @@ export class WorkbenchStore {
           syncService.exec(command);
         };
 
+        artifact.runner.onPreviewUrl = (url: string) => {
+          this.#injectCoolifyPreview(url);
+        };
+
         // When sidecar reports dev server ready, inject Coolify preview
         syncService.onServerReady = (data: { port?: number }) => {
           const containers = coolifyContainers.get();

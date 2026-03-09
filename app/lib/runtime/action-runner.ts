@@ -74,6 +74,7 @@ export class ActionRunner {
   onDeployAlert?: (alert: DeployAlert) => void;
   onFileWrite?: (path: string, content: string) => void;
   onShellExec?: (command: string) => void;
+  onPreviewUrl?: (url: string) => void;
   coolifyEnabled?: boolean;
   buildOutput?: { path: string; exitCode: number; output: string };
 
@@ -186,6 +187,14 @@ export class ActionRunner {
 
           // Store build output for deployment
           this.buildOutput = buildOutput;
+          break;
+        }
+        case 'preview': {
+          if ('url' in action && action.url) {
+            logger.debug(`Setting preview URL: ${action.url}`);
+            this.onPreviewUrl?.(action.url);
+          }
+
           break;
         }
         case 'start': {
