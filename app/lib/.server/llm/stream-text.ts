@@ -65,6 +65,7 @@ export async function streamText(props: {
   messageSliceId?: number;
   chatMode?: 'discuss' | 'build';
   designScheme?: DesignScheme;
+  coolifyEnabled?: boolean;
 }) {
   const {
     messages,
@@ -79,6 +80,7 @@ export async function streamText(props: {
     summary,
     chatMode,
     designScheme,
+    coolifyEnabled,
   } = props;
   let currentModel = DEFAULT_MODEL;
   let currentProvider = DEFAULT_PROVIDER.name;
@@ -160,6 +162,7 @@ export async function streamText(props: {
         hasSelectedProject: options?.supabaseConnection?.hasSelectedProject || false,
         credentials: options?.supabaseConnection?.credentials || undefined,
       },
+      coolifyEnabled,
     }) ?? getSystemPrompt();
 
   if (chatMode === 'build' && contextFiles && contextOptimization) {

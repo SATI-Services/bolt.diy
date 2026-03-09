@@ -48,7 +48,7 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
     },
   });
 
-  const { messages, files, promptId, contextOptimization, supabase, chatMode, designScheme, maxLLMSteps } =
+  const { messages, files, promptId, contextOptimization, supabase, chatMode, designScheme, maxLLMSteps, coolifyEnabled } =
     await request.json<{
       messages: Messages;
       files: any;
@@ -65,6 +65,7 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
         };
       };
       maxLLMSteps: number;
+      coolifyEnabled?: boolean;
     }>();
 
   const cookieHeader = request.headers.get('Cookie');
@@ -278,6 +279,7 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
               contextFiles: filteredFiles,
               chatMode,
               designScheme,
+              coolifyEnabled,
               summary,
               messageSliceId,
             });
@@ -319,6 +321,7 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
           contextFiles: filteredFiles,
           chatMode,
           designScheme,
+          coolifyEnabled,
           summary,
           messageSliceId,
         });
