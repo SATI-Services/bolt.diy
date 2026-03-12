@@ -5,6 +5,7 @@ import { memo, useEffect, useRef, useState } from 'react';
 import { createHighlighter, type BundledLanguage, type BundledTheme, type HighlighterGeneric } from 'shiki';
 import type { ActionState } from '~/lib/runtime/action-runner';
 import { workbenchStore } from '~/lib/stores/workbench';
+import { coolifySettings } from '~/lib/stores/coolify';
 import { classNames } from '~/utils/classNames';
 import { cubicEasingFn } from '~/utils/easings';
 import { WORK_DIR } from '~/utils/constants';
@@ -33,6 +34,8 @@ export const Artifact = memo(({ artifactId }: ArtifactProps) => {
 
   const artifacts = useStore(workbenchStore.artifacts);
   const artifact = artifacts[artifactId];
+  const coolifyProvisionStatus = useStore(workbenchStore.coolifyProvisionStatus);
+  const coolifyEnabled = useStore(coolifySettings).enabled;
 
   const actions = useStore(
     computed(artifact.runner.actions, (actions) => {
@@ -133,6 +136,37 @@ export const Artifact = memo(({ artifactId }: ArtifactProps) => {
                   : 'Initial files created'
                 : 'Creating initial files'}
             </div>
+          </div>
+        )}
+        {coolifyEnabled && coolifyProvisionStatus !== 'idle' && coolifyProvisionStatus !== 'ready' && (
+          <div className="flex items-center gap-2 px-5 py-3 bg-bolt-elements-actions-background border-t border-bolt-elements-artifacts-borderColor">
+            <div
+              className={classNames(
+                'text-lg',
+                coolifyProvisionStatus === 'error'
+                  ? 'text-bolt-elements-icon-error'
+                  : 'text-bolt-elements-loader-progress',
+              )}
+            >
+              {coolifyProvisionStatus === 'provisioning' ? (
+                <div className="i-svg-spinners:90-ring-with-bg"></div>
+              ) : (
+                <div className="i-ph:x"></div>
+              )}
+            </div>
+            <span className="text-sm text-bolt-elements-textPrimary">
+              {coolifyProvisionStatus === 'provisioning'
+                ? 'Provisioning Coolify container...'
+                : 'Container provisioning failed'}
+            </span>
+          </div>
+        )}
+        {coolifyEnabled && coolifyProvisionStatus === 'ready' && actions.length === 0 && (
+          <div className="flex items-center gap-2 px-5 py-3 bg-bolt-elements-actions-background border-t border-bolt-elements-artifacts-borderColor">
+            <div className="text-lg text-bolt-elements-icon-success">
+              <div className="i-ph:check"></div>
+            </div>
+            <span className="text-sm text-bolt-elements-textPrimary">Container ready</span>
           </div>
         )}
         <AnimatePresence>

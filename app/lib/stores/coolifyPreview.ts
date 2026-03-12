@@ -89,9 +89,12 @@ export async function provisionContainer(chatId: string): Promise<CoolifyContain
     // Now start the app (env vars, domain, and labels are set)
     await coolifyApi.startApp(apiOptions, app.uuid);
 
-    // Sidecar HTTP API URL — accessed via server-side proxy
-    const serverHost = new URL(connection.url).hostname;
-    const sidecarUrl = `http://${serverHost}:${sidecarPort}`;
+    /*
+     * Sidecar HTTP API URL — accessed via server-side proxy (/api/sidecar-proxy).
+     * Use localhost because the proxy runs on the same machine as the containers.
+     * Using the external hostname would hit the firewall on random high ports.
+     */
+    const sidecarUrl = `http://localhost:${sidecarPort}`;
 
     const containerState: CoolifyContainerState = {
       appUuid: app.uuid,
@@ -127,7 +130,7 @@ export async function provisionContainer(chatId: string): Promise<CoolifyContain
           const actualHostPort = mapping?.split(':')[0];
 
           if (actualHostPort) {
-            actualSidecarUrl = `http://${serverHost}:${actualHostPort}`;
+            actualSidecarUrl = `http://localhost:${actualHostPort}`;
           }
         }
 

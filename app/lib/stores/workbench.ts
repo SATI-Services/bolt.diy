@@ -63,6 +63,9 @@ export class WorkbenchStore {
   #globalExecutionQueue = Promise.resolve();
   #coolifyProvisionPromise: Promise<unknown> | null = null;
   #coolifyProvisionChatId: string | null = null;
+  coolifyProvisionStatus: WritableAtom<'idle' | 'provisioning' | 'ready' | 'error'> = atom<
+    'idle' | 'provisioning' | 'ready' | 'error'
+  >('idle');
   constructor() {
     if (import.meta.hot) {
       import.meta.hot.data.artifacts = this.artifacts;
@@ -163,13 +166,18 @@ export class WorkbenchStore {
       this.#injectCoolifyPreview(existing.domain);
       this.#coolifyProvisionChatId = chatId;
       this.#coolifyProvisionPromise = Promise.resolve(existing);
+      this.coolifyProvisionStatus.set('ready');
     } else if (!existing || existing.status === 'error') {
       this.#coolifyProvisionChatId = chatId;
+      this.coolifyProvisionStatus.set('provisioning');
       this.#coolifyProvisionPromise = provisionContainer(chatId).then((container) => {
         if (container) {
           const syncService = getCoolifyFileSyncService();
           syncService.connect(container.wsUrl, container.sidecarToken);
           this.#injectCoolifyPreview(container.domain);
+          this.coolifyProvisionStatus.set('ready');
+        } else {
+          this.coolifyProvisionStatus.set('error');
         }
 
         return container;

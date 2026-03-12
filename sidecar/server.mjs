@@ -315,6 +315,45 @@ const httpServer = http.createServer(async (req, res) => {
       const result = await execCommand(body.command);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
+    } else if (req.url === '/exec-stream' && req.method === 'POST') {
+      // Streaming exec — sends stdout/stderr as SSE, then final exit code
+      closePlaceholder();
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      });
+
+      const proc = spawn('sh', ['-c', body.command], {
+        cwd: WORKDIR,
+        env: { ...process.env, HOME: WORKDIR },
+      });
+
+      let output = '';
+
+      proc.stdout.on('data', (data) => {
+        const text = data.toString();
+        output += text;
+        res.write(`data: ${JSON.stringify({ type: 'stdout', data: text })}\n\n`);
+      });
+      proc.stderr.on('data', (data) => {
+        const text = data.toString();
+        output += text;
+        res.write(`data: ${JSON.stringify({ type: 'stderr', data: text })}\n\n`);
+      });
+      proc.on('close', (exitCode) => {
+        res.write(`data: ${JSON.stringify({ type: 'exit', exitCode: exitCode ?? 1, output })}\n\n`);
+        res.end();
+      });
+      proc.on('error', (error) => {
+        res.write(`data: ${JSON.stringify({ type: 'exit', exitCode: 1, output: error.message })}\n\n`);
+        res.end();
+      });
+
+      // Handle client disconnect
+      req.on('close', () => {
+        proc.kill();
+      });
     } else if (req.url === '/batch' && req.method === 'POST') {
       if (Array.isArray(body.operations)) {
         for (const op of body.operations) {
