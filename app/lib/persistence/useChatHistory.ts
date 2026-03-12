@@ -68,37 +68,10 @@ export function useChatHistory() {
         getSnapshot(db, mixedId), // Fetch snapshot from DB
       ])
         .then(async ([storedMessages, snapshot]) => {
-          // Phase 4D: If no local data, try loading from server
-          if (!storedMessages || storedMessages.messages.length === 0) {
-            try {
-              const resp = await fetch(`/api/chats/${encodeURIComponent(mixedId)}`);
-
-              if (resp.ok) {
-                const serverChat = (await resp.json()) as {
-                  messages?: Message[];
-                  description?: string;
-                  metadata?: IChatMetadata;
-                };
-
-                if (serverChat?.messages && serverChat.messages.length > 0) {
-                  // Populate IndexedDB with server data
-                  const nextId = await getNextId(db!);
-                  await setMessages(db!, nextId, serverChat.messages, mixedId, serverChat.description);
-                  storedMessages = {
-                    id: nextId,
-                    urlId: mixedId,
-                    messages: serverChat.messages,
-                    description: serverChat.description,
-                    metadata: serverChat.metadata,
-                    timestamp: new Date().toISOString(),
-                  };
-                  console.log('Chat loaded from server and cached locally');
-                }
-              }
-            } catch (e) {
-              console.warn('Failed to load chat from server:', e);
-            }
-          }
+          /*
+           * Phase 4D disabled: server-side chat persistence requires Node.js fs
+           * which isn't available in the wrangler/workerd runtime.
+           */
 
           if (storedMessages && storedMessages.messages.length > 0) {
             /*
@@ -374,20 +347,11 @@ ${value.content}
         chatMetadata.get(),
       );
 
-      // Phase 4C: Fire-and-forget dual-write to server for shareable URLs
-      if (_urlId) {
-        fetch(`/api/chats/${encodeURIComponent(_urlId)}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            urlId: _urlId,
-            id: finalChatId,
-            description: description.get(),
-            messages: [...archivedMessages, ...messages],
-            metadata: chatMetadata.get(),
-          }),
-        }).catch((e) => console.warn('Failed to sync chat to server:', e));
-      }
+      /*
+       * Phase 4C disabled: server-side chat persistence requires Node.js fs
+       * which isn't available in the wrangler/workerd runtime. Re-enable when
+       * switching to a compatible storage backend (D1, KV, etc).
+       */
     },
     duplicateCurrentChat: async (listItemId: string) => {
       if (!db || (!mixedId && !listItemId)) {
