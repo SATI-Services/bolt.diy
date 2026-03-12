@@ -61,6 +61,8 @@ export class WorkbenchStore {
   modifiedFiles = new Set<string>();
   artifactIdList: string[] = [];
   #globalExecutionQueue = Promise.resolve();
+  #coolifyProvisionPromise: Promise<unknown> | null = null;
+  #coolifyProvisionChatId: string | null = null;
   constructor() {
     if (import.meta.hot) {
       import.meta.hot.data.artifacts = this.artifacts;
@@ -138,6 +140,41 @@ export class WorkbenchStore {
 
   clearDeployAlert() {
     this.deployAlert.set(undefined);
+  }
+
+  /**
+   * Start provisioning a Coolify container early (when user sends message).
+   * The promise is stored so addArtifact can attach it to the action runner.
+   */
+  startCoolifyProvisioning(chatId: string) {
+    const settings = coolifySettings.get();
+
+    if (!settings.enabled || !settings.autoProvision) {
+      return;
+    }
+
+    const containers = coolifyContainers.get();
+    const existing = containers[chatId];
+
+    if (existing && existing.status === 'running' && existing.wsUrl) {
+      // Already running — reconnect
+      const syncService = getCoolifyFileSyncService();
+      syncService.connect(existing.wsUrl, existing.sidecarToken);
+      this.#injectCoolifyPreview(existing.domain);
+      this.#coolifyProvisionChatId = chatId;
+      this.#coolifyProvisionPromise = Promise.resolve(existing);
+    } else if (!existing || existing.status === 'error') {
+      this.#coolifyProvisionChatId = chatId;
+      this.#coolifyProvisionPromise = provisionContainer(chatId).then((container) => {
+        if (container) {
+          const syncService = getCoolifyFileSyncService();
+          syncService.connect(container.wsUrl, container.sidecarToken);
+          this.#injectCoolifyPreview(container.domain);
+        }
+
+        return container;
+      });
+    }
   }
 
   toggleTerminal(value?: boolean) {
@@ -540,7 +577,7 @@ export class WorkbenchStore {
         };
 
         artifact.runner.onShellExec = (command) => {
-          syncService.exec(command);
+          return syncService.exec(command);
         };
 
         artifact.runner.onPreviewUrl = (url: string) => {
@@ -564,27 +601,12 @@ export class WorkbenchStore {
           }
         };
 
-        // Auto-provision container and gate action execution on readiness
-        if (settings.autoProvision) {
-          const chatId = messageId;
-          const containers = coolifyContainers.get();
-          const existing = containers[chatId];
-
-          if (existing && existing.status === 'running' && existing.wsUrl) {
-            // Reconnect to existing container
-            syncService.connect(existing.wsUrl, existing.sidecarToken);
-            this.#injectCoolifyPreview(existing.domain);
-          } else if (!existing) {
-            // Store the provision promise so actions wait for container
-            artifact.runner.containerReadyPromise = provisionContainer(chatId).then((container) => {
-              if (container) {
-                syncService.connect(container.wsUrl, container.sidecarToken);
-                this.#injectCoolifyPreview(container.domain);
-              }
-
-              return container;
-            });
-          }
+        /*
+         * Use the pre-started provision promise (from startCoolifyProvisioning)
+         * so actions wait until the container is fully ready
+         */
+        if (this.#coolifyProvisionPromise) {
+          artifact.runner.containerReadyPromise = this.#coolifyProvisionPromise;
         }
       }
     }

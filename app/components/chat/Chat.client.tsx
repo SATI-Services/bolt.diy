@@ -5,7 +5,7 @@ import { useAnimate } from 'framer-motion';
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'react-toastify';
 import { useMessageParser, usePromptEnhancer, useShortcuts } from '~/lib/hooks';
-import { description, useChatHistory } from '~/lib/persistence';
+import { chatId, description, useChatHistory } from '~/lib/persistence';
 import { chatStore } from '~/lib/stores/chat';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, PROMPT_COOKIE_KEY, PROVIDER_LIST } from '~/utils/constants';
@@ -411,6 +411,12 @@ export const ChatImpl = memo(
       }
 
       runAnimation();
+
+      // Start Coolify container provisioning immediately — don't wait for LLM response
+      if (coolifySettingsState.enabled) {
+        const provisionId = chatId.get() || `chat-${Date.now()}`;
+        workbenchStore.startCoolifyProvisioning(provisionId);
+      }
 
       if (!chatStarted) {
         setFakeLoading(true);

@@ -1,5 +1,6 @@
 import type { WebContainer } from '@webcontainer/api';
 import { path as nodePath } from '~/utils/path';
+import { WORK_DIR } from '~/utils/constants';
 import { atom, map, type MapStore } from 'nanostores';
 import type { ActionAlert, BoltAction, DeployAlert, FileHistory, SupabaseAction, SupabaseAlert } from '~/types/actions';
 import { createScopedLogger } from '~/utils/logger';
@@ -73,7 +74,7 @@ export class ActionRunner {
   onSupabaseAlert?: (alert: SupabaseAlert) => void;
   onDeployAlert?: (alert: DeployAlert) => void;
   onFileWrite?: (path: string, content: string) => void;
-  onShellExec?: (command: string) => void;
+  onShellExec?: (command: string) => Promise<{ exitCode: number; output: string }>;
   onPreviewUrl?: (url: string) => void;
   coolifyEnabled?: boolean;
   containerReadyPromise?: Promise<unknown>;
@@ -284,7 +285,14 @@ export class ActionRunner {
      */
     if (this.coolifyEnabled) {
       logger.debug(`[Coolify] Routing shell command to sidecar: ${action.content}`);
-      this.onShellExec?.(action.content);
+
+      if (this.onShellExec) {
+        const result = await this.onShellExec(action.content);
+
+        if (result.exitCode !== 0) {
+          throw new ActionCommandError(`Shell command failed (exit ${result.exitCode})`, result.output);
+        }
+      }
 
       return;
     }
@@ -318,7 +326,11 @@ export class ActionRunner {
     // When Coolify is enabled, route start commands exclusively to sidecar.
     if (this.coolifyEnabled) {
       logger.debug(`[Coolify] Routing start command to sidecar: ${action.content}`);
-      this.onShellExec?.(action.content);
+
+      // Start commands are long-running (dev servers) — fire and don't wait for exit
+      if (this.onShellExec) {
+        this.onShellExec(action.content);
+      }
 
       return;
     }
@@ -352,8 +364,7 @@ export class ActionRunner {
 
     // In Coolify mode, write directly to sidecar only — skip WebContainer entirely
     if (this.coolifyEnabled) {
-      const webcontainer = await this.#webcontainer;
-      const relativePath = nodePath.relative(webcontainer.workdir, action.filePath);
+      const relativePath = nodePath.relative(WORK_DIR, action.filePath);
       logger.debug(`[Coolify] File written to sidecar only: ${relativePath}`);
       this.onFileWrite?.(relativePath, action.content);
 

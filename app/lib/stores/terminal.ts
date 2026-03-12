@@ -64,24 +64,45 @@ export class TerminalStore {
 
   async #attachCoolifyTerminal(terminal: ITerminal) {
     // Find any running container to get sidecar URL and token
-    const containers = coolifyContainers.get();
-    let sidecarUrl: string | undefined;
-    let sidecarToken: string | undefined;
+    const findRunningContainer = () => {
+      const containers = coolifyContainers.get();
 
-    for (const container of Object.values(containers)) {
-      if (container.status === 'running' && container.wsUrl && container.sidecarToken) {
-        sidecarUrl = container.wsUrl;
-        sidecarToken = container.sidecarToken;
-        break;
+      for (const container of Object.values(containers)) {
+        if (container.status === 'running' && container.wsUrl && container.sidecarToken) {
+          return container;
+        }
+      }
+
+      return null;
+    };
+
+    let container = findRunningContainer();
+
+    if (!container) {
+      terminal.write('\x1b[33mWaiting for Coolify container to be ready...\x1b[0m\r\n');
+
+      // Poll until a container is running (max 60 attempts = ~120 seconds)
+      for (let i = 0; i < 60; i++) {
+        await new Promise((r) => setTimeout(r, 2000));
+        container = findRunningContainer();
+
+        if (container) {
+          break;
+        }
+
+        if (i % 5 === 4) {
+          terminal.write(`\x1b[33m  Still waiting... (${(i + 1) * 2}s)\x1b[0m\r\n`);
+        }
+      }
+
+      if (!container) {
+        terminal.write('\x1b[31mContainer provisioning timed out.\x1b[0m\r\n');
+        return;
       }
     }
 
-    if (!sidecarUrl || !sidecarToken) {
-      terminal.write(coloredText.red('No running Coolify container found.\r\n'));
-      terminal.write('Waiting for container to provision...\r\n');
-
-      return;
-    }
+    const sidecarUrl = container.wsUrl;
+    const sidecarToken = container.sidecarToken;
 
     try {
       // Connect via the proxy route
