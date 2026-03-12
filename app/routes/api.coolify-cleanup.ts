@@ -6,7 +6,11 @@ async function coolifyCleanupAction({ request }: ActionFunctionArgs) {
   }
 
   try {
-    const { coolifyUrl, token, appUuid } = await request.json();
+    const { coolifyUrl, token, appUuid } = await request.json<{
+      coolifyUrl: string;
+      token: string;
+      appUuid: string;
+    }>();
 
     if (!coolifyUrl || !token || !appUuid) {
       return json({ error: 'Missing required fields' }, { status: 400 });

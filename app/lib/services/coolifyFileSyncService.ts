@@ -92,6 +92,7 @@ export class CoolifyFileSyncService {
 
         if (health.serverReady && health.detectedPort) {
           this.#onServerReady?.({ type: 'server_ready', port: health.detectedPort });
+
           // Stop polling once server is ready
           this.#stopHealthCheck();
         }

@@ -13,6 +13,7 @@ import JSZip from 'jszip';
 import fileSaver from 'file-saver';
 import { Octokit, type RestEndpointMethodTypes } from '@octokit/rest';
 import { path } from '~/utils/path';
+import { WORK_DIR } from '~/utils/constants';
 import { extractRelativePath } from '~/utils/diff';
 import { description } from '~/lib/persistence';
 import Cookies from 'js-cookie';
@@ -519,13 +520,23 @@ export class WorkbenchStore {
 
       if (artifact) {
         artifact.runner.coolifyEnabled = true;
+
         const syncService = getCoolifyFileSyncService();
 
         artifact.runner.onFileWrite = (filePath, content) => {
-          // Normalize path: strip leading ../ segments to get a clean relative path
-          // WebContainer paths may be relative to a different workdir (e.g. ../../index.html)
+          /*
+           * Normalize path: strip leading ../ segments to get a clean relative path
+           * WebContainer paths may be relative to a different workdir (e.g. ../../index.html)
+           */
           const normalizedPath = filePath.replace(/^(\.\.\/)+/, '');
           syncService.writeFile(normalizedPath, content);
+
+          /*
+           * Update the files store directly so the editor/sidebar stays in sync
+           * without writing to WebContainer
+           */
+          const fullPath = path.join(WORK_DIR, normalizedPath);
+          this.#filesStore.setFileFromAction(fullPath, content);
         };
 
         artifact.runner.onShellExec = (command) => {
@@ -548,15 +559,12 @@ export class WorkbenchStore {
 
             // Add Coolify preview if not already present
             if (!currentPreviews.some((p) => p.baseUrl === coolifyUrl)) {
-              this.previews.set([
-                ...currentPreviews,
-                { port: data.port || 3000, ready: true, baseUrl: coolifyUrl },
-              ]);
+              this.previews.set([...currentPreviews, { port: data.port || 3000, ready: true, baseUrl: coolifyUrl }]);
             }
           }
         };
 
-        // Auto-provision container if enabled
+        // Auto-provision container and gate action execution on readiness
         if (settings.autoProvision) {
           const chatId = messageId;
           const containers = coolifyContainers.get();
@@ -567,11 +575,14 @@ export class WorkbenchStore {
             syncService.connect(existing.wsUrl, existing.sidecarToken);
             this.#injectCoolifyPreview(existing.domain);
           } else if (!existing) {
-            provisionContainer(chatId).then((container) => {
+            // Store the provision promise so actions wait for container
+            artifact.runner.containerReadyPromise = provisionContainer(chatId).then((container) => {
               if (container) {
                 syncService.connect(container.wsUrl, container.sidecarToken);
                 this.#injectCoolifyPreview(container.domain);
               }
+
+              return container;
             });
           }
         }
@@ -679,10 +690,7 @@ export class WorkbenchStore {
     const currentPreviews = this.previews.get();
 
     if (!currentPreviews.some((p) => p.baseUrl === coolifyUrl)) {
-      this.previews.set([
-        ...currentPreviews,
-        { port: 3000, ready: true, baseUrl: coolifyUrl },
-      ]);
+      this.previews.set([...currentPreviews, { port: 3000, ready: true, baseUrl: coolifyUrl }]);
     }
   }
 

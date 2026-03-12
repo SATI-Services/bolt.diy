@@ -133,7 +133,7 @@ RUN npm install -g --force ws pnpm typescript tsx vite \
 WORKDIR /app
 
 COPY server.mjs /sidecar/server.mjs
-RUN cd /sidecar && npm init -y && npm install ws
+RUN cd /sidecar && npm init -y && npm install ws node-pty
 
 EXPOSE 3000 9838 9839
 

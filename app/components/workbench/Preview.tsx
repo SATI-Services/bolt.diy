@@ -102,9 +102,7 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
     coolifySettingsValue.enabled &&
     coolifySettingsValue.autoProvision &&
     !activePreview &&
-    Object.values(coolifyContainersValue).some(
-      (c: any) => c.status === 'provisioning' || c.status === 'running',
-    );
+    Object.values(coolifyContainersValue).some((c: any) => c.status === 'provisioning' || c.status === 'running');
 
   // Check if a URL is a Coolify preview URL
   const isCoolifyUrl = useCallback((url: string) => {
@@ -117,7 +115,7 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
       setDisplayPath('/');
       setCoolifyProbing(false);
 
-      return;
+      return undefined;
     }
 
     const { baseUrl } = activePreview;
@@ -133,10 +131,12 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
       const probe = async () => {
         while (!cancelled && attempt < 30) {
           try {
-            const resp = await fetch(baseUrl, { method: 'HEAD', mode: 'no-cors' });
+            await fetch(baseUrl, { method: 'HEAD', mode: 'no-cors' });
 
-            // mode: no-cors returns opaque response (status 0) on success
-            // A network error (cert invalid, connection refused) throws
+            /*
+             * mode: no-cors returns opaque response (status 0) on success
+             * A network error (cert invalid, connection refused) throws
+             */
             if (!cancelled) {
               setCoolifyProbing(false);
               setIframeUrl(baseUrl);
@@ -164,6 +164,8 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
     }
 
     setIframeUrl(baseUrl);
+
+    return undefined;
   }, [activePreview, isCoolifyUrl]);
 
   const findMinPortIndex = useCallback(

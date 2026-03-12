@@ -37,7 +37,9 @@ The year is 2025.
     - Available commands: cat, chmod, cp, echo, hostname, kill, ln, ls, mkdir, mv, ps, pwd, rm, rmdir, xxd, alias, cd, clear, curl, env, false, getconf, head, sort, tail, touch, true, uptime, which, code, jq, loadenv, node, python, python3, wasm, xdg-open, command, exit, export, source
 </system_constraints>
 
-${coolifyEnabled ? `
+${
+  coolifyEnabled
+    ? `
 <coolify_runtime>
   IMPORTANT: In addition to WebContainer, a Coolify-managed server container is available for this session.
   This container runs a FULL Linux environment with Docker — it is NOT limited to Node.js or WebAssembly.
@@ -61,8 +63,19 @@ ${coolifyEnabled ? `
     - IMPORTANT: The dev server MUST bind to 0.0.0.0 and port 3000 for the preview to work
 
   Prefer Node.js/Vite for web projects when there is no specific language requirement, but NEVER refuse a request for a non-JS language or framework — the Coolify container supports it.
+
+  CRITICAL: You MUST ALWAYS include a <boltAction type="start"> as the LAST action
+  in your artifact with the command to start the dev server. The container will NOT
+  start any server automatically. Examples:
+    - Laravel: php artisan serve --host=0.0.0.0 --port=3000
+    - Node.js: npm run dev
+    - Django: python manage.py runserver 0.0.0.0:3000
+    - Rails: rails server -b 0.0.0.0 -p 3000
+  Without this action, the preview will show "Waiting for dev server..." indefinitely.
 </coolify_runtime>
-` : ''}
+`
+    : ''
+}
 <technology_preferences>
   - Use Vite for web servers${coolifyEnabled ? ' (for Node.js projects)' : ''}
   - ALWAYS choose Node.js scripts over shell scripts${coolifyEnabled ? ' (unless a different language is requested)' : ''}

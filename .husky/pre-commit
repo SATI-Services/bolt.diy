@@ -2,9 +2,16 @@
 
 echo "🔍 Running pre-commit hook to check the code looks good... 🔍"
 
-# Load NVM if available (useful for managing Node.js versions)
+# Load NVM if available, but only if it provides Node >= 18
 export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+if [ -s "$NVM_DIR/nvm.sh" ]; then
+    . "$NVM_DIR/nvm.sh"
+    NODE_MAJOR=$(node -v 2>/dev/null | sed 's/v\([0-9]*\).*/\1/')
+    if [ "$NODE_MAJOR" -lt 18 ] 2>/dev/null; then
+        # NVM Node is too old, prefer system Node
+        export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+    fi
+fi
 
 # Ensure `pnpm` is available
 echo "Checking if pnpm is available..."

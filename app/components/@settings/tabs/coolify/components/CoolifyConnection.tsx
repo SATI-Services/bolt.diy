@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { toast } from 'react-toastify';
+
 import { useStore } from '@nanostores/react';
 import {
   coolifyConnection,
@@ -33,6 +33,7 @@ export default function CoolifyConnection() {
 
     try {
       setLoadingServers(true);
+
       const serverList = await coolifyApi.listServers(apiOptions);
       setServers(serverList);
     } catch {
@@ -43,6 +44,7 @@ export default function CoolifyConnection() {
 
     try {
       setLoadingProjects(true);
+
       const projectList = await coolifyApi.listProjects(apiOptions);
       setProjects(projectList);
     } catch {
@@ -199,9 +201,7 @@ export default function CoolifyConnection() {
         </div>
 
         <div>
-          <label className="block text-sm text-bolt-elements-textSecondary mb-1">
-            Container TTL (minutes)
-          </label>
+          <label className="block text-sm text-bolt-elements-textSecondary mb-1">Container TTL (minutes)</label>
           <input
             type="number"
             value={settings.containerTtl}
@@ -213,9 +213,7 @@ export default function CoolifyConnection() {
         </div>
 
         <div>
-          <label className="block text-sm text-bolt-elements-textSecondary mb-1">
-            Sidecar Image
-          </label>
+          <label className="block text-sm text-bolt-elements-textSecondary mb-1">Sidecar Image</label>
           <input
             type="text"
             value={settings.sidecarImage}

@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
 import net from 'net';
+import { createRequire } from 'module';
 
 const WS_PORT = parseInt(process.env.SIDECAR_PORT || '9838', 10);
 const HTTP_PORT = parseInt(process.env.SIDECAR_HTTP_PORT || '9839', 10);
@@ -339,6 +340,95 @@ const httpServer = http.createServer(async (req, res) => {
 httpServer.listen(HTTP_PORT, '0.0.0.0', () => {
   console.log(`[Sidecar] HTTP API listening on 0.0.0.0:${HTTP_PORT}`);
   console.log(`[Sidecar] Working directory: ${WORKDIR}`);
+});
+
+// ---- PTY Terminal WebSocket endpoint ----
+const require = createRequire(import.meta.url);
+
+let ptyModule;
+try {
+  ptyModule = require('node-pty');
+} catch (e) {
+  console.warn('[Sidecar] node-pty not available, terminal endpoint disabled');
+}
+
+const terminalWss = new WebSocketServer({ noServer: true });
+
+httpServer.on('upgrade', (req, socket, head) => {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+
+  if (url.pathname === '/terminal') {
+    // Authenticate via query param or header
+    const authToken = url.searchParams.get('token') || req.headers['authorization']?.replace('Bearer ', '');
+
+    if (authToken !== TOKEN) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    if (!ptyModule) {
+      socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    terminalWss.handleUpgrade(req, socket, head, (ws) => {
+      terminalWss.emit('connection', ws, req);
+    });
+  } else {
+    socket.destroy();
+  }
+});
+
+terminalWss.on('connection', (ws) => {
+  console.log('[Sidecar] Terminal client connected');
+
+  const pty = ptyModule.spawn('/bin/bash', [], {
+    name: 'xterm-256color',
+    cols: 80,
+    rows: 24,
+    cwd: WORKDIR,
+    env: { ...process.env, HOME: WORKDIR, TERM: 'xterm-256color' },
+  });
+
+  pty.onData((data) => {
+    try {
+      if (ws.readyState === 1) {
+        ws.send(data);
+      }
+    } catch (e) {
+      // ignore
+    }
+  });
+
+  ws.on('message', (raw) => {
+    const msg = raw.toString();
+
+    // Check if it's a JSON control message
+    try {
+      const parsed = JSON.parse(msg);
+      if (parsed.type === 'resize' && parsed.cols && parsed.rows) {
+        pty.resize(parsed.cols, parsed.rows);
+        return;
+      }
+    } catch {
+      // Not JSON, treat as terminal input
+    }
+
+    pty.write(msg);
+  });
+
+  ws.on('close', () => {
+    console.log('[Sidecar] Terminal client disconnected');
+    pty.kill();
+  });
+
+  pty.onExit(() => {
+    if (ws.readyState === 1) {
+      ws.close();
+    }
+  });
 });
 
 // ---- Graceful shutdown ----

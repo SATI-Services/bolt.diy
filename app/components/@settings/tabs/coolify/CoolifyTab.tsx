@@ -25,9 +25,7 @@ export default function CoolifyTab() {
         <CoolifyLogo />
         <div>
           <h3 className="text-lg font-medium text-bolt-elements-textPrimary">Coolify Live Preview</h3>
-          <p className="text-sm text-bolt-elements-textSecondary">
-            Self-hosted preview containers with shareable URLs
-          </p>
+          <p className="text-sm text-bolt-elements-textSecondary">Self-hosted preview containers with shareable URLs</p>
         </div>
       </div>
 

@@ -76,6 +76,7 @@ export class ActionRunner {
   onShellExec?: (command: string) => void;
   onPreviewUrl?: (url: string) => void;
   coolifyEnabled?: boolean;
+  containerReadyPromise?: Promise<unknown>;
   buildOutput?: { path: string; exitCode: number; output: string };
 
   constructor(
@@ -153,6 +154,11 @@ export class ActionRunner {
   }
 
   async #executeAction(actionId: string, isStreaming: boolean = false) {
+    // Wait for Coolify container to be ready before executing any action
+    if (this.coolifyEnabled && this.containerReadyPromise) {
+      await this.containerReadyPromise;
+    }
+
     const action = this.actions.get()[actionId];
 
     this.#updateAction(actionId, { status: 'running' });
@@ -272,11 +278,14 @@ export class ActionRunner {
       action.content = validationResult.modifiedCommand;
     }
 
-    // When Coolify is enabled, route commands exclusively to sidecar.
-    // WebContainer shell can hang on interactive prompts (e.g. npm create vite "Ok to proceed?").
+    /*
+     * When Coolify is enabled, route commands exclusively to sidecar.
+     * WebContainer shell can hang on interactive prompts (e.g. npm create vite "Ok to proceed?").
+     */
     if (this.coolifyEnabled) {
       logger.debug(`[Coolify] Routing shell command to sidecar: ${action.content}`);
       this.onShellExec?.(action.content);
+
       return;
     }
 
@@ -310,6 +319,7 @@ export class ActionRunner {
     if (this.coolifyEnabled) {
       logger.debug(`[Coolify] Routing start command to sidecar: ${action.content}`);
       this.onShellExec?.(action.content);
+
       return;
     }
 
@@ -333,13 +343,21 @@ export class ActionRunner {
     if (resp?.exitCode != 0) {
       throw new ActionCommandError('Failed To Start Application', resp?.output || 'No Output Available');
     }
-
-    return resp;
   }
 
   async #runFileAction(action: ActionState) {
     if (action.type !== 'file') {
       unreachable('Expected file action');
+    }
+
+    // In Coolify mode, write directly to sidecar only — skip WebContainer entirely
+    if (this.coolifyEnabled) {
+      const webcontainer = await this.#webcontainer;
+      const relativePath = nodePath.relative(webcontainer.workdir, action.filePath);
+      logger.debug(`[Coolify] File written to sidecar only: ${relativePath}`);
+      this.onFileWrite?.(relativePath, action.content);
+
+      return;
     }
 
     const webcontainer = await this.#webcontainer;

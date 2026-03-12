@@ -415,7 +415,7 @@ export const ChatImpl = memo(
       if (!chatStarted) {
         setFakeLoading(true);
 
-        if (autoSelectTemplate) {
+        if (autoSelectTemplate && !coolifySettingsState.enabled) {
           const { template, title } = await selectStarterTemplate({
             message: finalMessageContent,
             model,

@@ -10,7 +10,13 @@ async function sidecarProxyAction({ request }: ActionFunctionArgs) {
   }
 
   try {
-    const { sidecarUrl, token, endpoint, method, body } = await request.json();
+    const { sidecarUrl, token, endpoint, method, body } = await request.json<{
+      sidecarUrl: string;
+      token: string;
+      endpoint: string;
+      method?: string;
+      body?: unknown;
+    }>();
 
     if (!sidecarUrl || !endpoint) {
       return json({ error: 'Missing required fields: sidecarUrl, endpoint' }, { status: 400 });
@@ -23,7 +29,7 @@ async function sidecarProxyAction({ request }: ActionFunctionArgs) {
     };
 
     if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
+      headers.Authorization = `Bearer ${token}`;
     }
 
     const response = await fetch(apiUrl, {

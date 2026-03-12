@@ -26,11 +26,11 @@ async function coolifyFetch(
     });
 
     // Unwrap the proxy response to look like a direct API response
-    const result = await proxyResponse.json();
+    const result = (await proxyResponse.json()) as { data?: unknown; status?: number };
     const responseBody = typeof result.data === 'string' ? result.data : JSON.stringify(result.data);
 
     return new Response(responseBody, {
-      status: result.status || proxyResponse.status,
+      status: (result.status as number) || proxyResponse.status,
       headers: { 'Content-Type': typeof result.data === 'string' ? 'text/plain' : 'application/json' },
     });
   }
@@ -58,6 +58,7 @@ export async function testConnection(options: CoolifyApiOptions): Promise<{ ok: 
     }
 
     const data = await response.text();
+
     return { ok: true, version: data.replace(/"/g, '') };
   } catch (error) {
     logger.error('Connection test failed:', error);
@@ -77,9 +78,7 @@ export async function listServers(
   return response.json();
 }
 
-export async function listProjects(
-  options: CoolifyApiOptions,
-): Promise<Array<{ uuid: string; name: string }>> {
+export async function listProjects(options: CoolifyApiOptions): Promise<Array<{ uuid: string; name: string }>> {
   const response = await coolifyFetch(options, '/projects');
 
   if (!response.ok) {
@@ -172,11 +171,7 @@ export async function setEnvVars(
   }
 }
 
-export async function updateAppDomain(
-  options: CoolifyApiOptions,
-  uuid: string,
-  fqdn: string,
-): Promise<void> {
+export async function updateAppDomain(options: CoolifyApiOptions, uuid: string, fqdn: string): Promise<void> {
   const response = await coolifyFetch(options, `/applications/${uuid}`, 'PATCH', {
     domains: fqdn,
   });
@@ -186,11 +181,7 @@ export async function updateAppDomain(
   }
 }
 
-export async function setCustomLabels(
-  options: CoolifyApiOptions,
-  uuid: string,
-  labels: string,
-): Promise<void> {
+export async function setCustomLabels(options: CoolifyApiOptions, uuid: string, labels: string): Promise<void> {
   const response = await coolifyFetch(options, `/applications/${uuid}`, 'PATCH', {
     custom_labels: btoa(labels),
   });
@@ -206,10 +197,7 @@ export async function setCustomLabels(
  * which injects Cross-Origin-Resource-Policy: cross-origin so the preview
  * can be embedded in an iframe on a COEP-enabled page (bolt.rdrt.org).
  */
-export async function patchCoolifyLabelsForCORP(
-  options: CoolifyApiOptions,
-  uuid: string,
-): Promise<void> {
+export async function patchCoolifyLabelsForCORP(options: CoolifyApiOptions, uuid: string): Promise<void> {
   // Fetch the current app to get auto-generated custom_labels
   const app = await getApp(options, uuid);
   const appData = app as Record<string, unknown>;

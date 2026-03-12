@@ -37,7 +37,13 @@ export const coolifySettings = atom<CoolifySettings>(initialSettings);
 export const isConnecting = atom<boolean>(false);
 
 // Auto-initialize connection on startup when env vars are configured
-if (typeof window !== 'undefined' && initialSettings.enabled && initialConnection.url && initialConnection.token && !initialConnection.connected) {
+if (
+  typeof window !== 'undefined' &&
+  initialSettings.enabled &&
+  initialConnection.url &&
+  initialConnection.token &&
+  !initialConnection.connected
+) {
   setTimeout(async () => {
     try {
       const result = await testConnection({ url: initialConnection.url, token: initialConnection.token });

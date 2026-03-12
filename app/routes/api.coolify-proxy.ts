@@ -6,7 +6,13 @@ async function coolifyProxyAction({ request }: ActionFunctionArgs) {
   }
 
   try {
-    const { coolifyUrl, token, endpoint, method, body } = await request.json();
+    const { coolifyUrl, token, endpoint, method, body } = await request.json<{
+      coolifyUrl: string;
+      token: string;
+      endpoint: string;
+      method?: string;
+      body?: unknown;
+    }>();
 
     if (!coolifyUrl || !token || !endpoint) {
       return json({ error: 'Missing required fields: coolifyUrl, token, endpoint' }, { status: 400 });

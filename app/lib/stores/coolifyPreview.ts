@@ -1,4 +1,4 @@
-import { atom, map } from 'nanostores';
+import { map } from 'nanostores';
 import type { CoolifyContainerState } from '~/types/coolify';
 import { coolifyConnection, coolifySettings } from './coolify';
 import * as coolifyApi from '~/lib/services/coolifyApiClient';
@@ -8,8 +8,7 @@ import { toast } from 'react-toastify';
 
 const logger = createScopedLogger('CoolifyPreview');
 
-const storedContainers =
-  typeof window !== 'undefined' ? localStorage.getItem('coolify_containers') : null;
+const storedContainers = typeof window !== 'undefined' ? localStorage.getItem('coolify_containers') : null;
 
 export const coolifyContainers = map<Record<string, CoolifyContainerState>>(
   storedContainers ? JSON.parse(storedContainers) : {},
@@ -24,6 +23,7 @@ function persistContainers() {
 function generateToken(): string {
   const array = new Uint8Array(32);
   crypto.getRandomValues(array);
+
   return Array.from(array, (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
@@ -68,9 +68,7 @@ export async function provisionContainer(chatId: string): Promise<CoolifyContain
     });
 
     // Set sidecar token env var BEFORE starting the app
-    await coolifyApi.setEnvVars(apiOptions, app.uuid, [
-      { key: 'SIDECAR_TOKEN', value: sidecarToken },
-    ]);
+    await coolifyApi.setEnvVars(apiOptions, app.uuid, [{ key: 'SIDECAR_TOKEN', value: sidecarToken }]);
 
     // Set custom domain under our wildcard so Traefik routes it correctly
     const customDomain = `https://${appName}.bolt.rdrt.org`;
@@ -170,7 +168,9 @@ export async function provisionContainer(chatId: string): Promise<CoolifyContain
           coolifyContainers.setKey(chatId, updatedState);
           persistContainers();
 
-          logger.debug(`Container running for chat ${chatId}: ${domain} (coolify: ${status}, sidecar: ${actualSidecarUrl})`);
+          logger.debug(
+            `Container running for chat ${chatId}: ${domain} (coolify: ${status}, sidecar: ${actualSidecarUrl})`,
+          );
           toast.success('Coolify preview container is ready');
 
           return updatedState;
@@ -260,9 +260,12 @@ export function startContainerCleanup() {
     return;
   }
 
-  cleanupInterval = setInterval(() => {
-    cleanupStaleContainers();
-  }, 5 * 60 * 1000); // Every 5 minutes
+  cleanupInterval = setInterval(
+    () => {
+      cleanupStaleContainers();
+    },
+    5 * 60 * 1000,
+  ); // Every 5 minutes
 }
 
 export function stopContainerCleanup() {

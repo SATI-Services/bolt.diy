@@ -492,6 +492,31 @@ export class FilesStore {
     return { isLocked: false };
   }
 
+  /**
+   * Directly update the files nanostore without touching WebContainer.
+   * Used in Coolify mode where files go only to the sidecar.
+   */
+  setFileFromAction(filePath: string, content: string) {
+    // Ensure parent directory entries exist in the map
+    const parts = filePath.split('/');
+
+    for (let i = 1; i < parts.length; i++) {
+      const dirPath = parts.slice(0, i).join('/');
+
+      if (dirPath && !this.files.get()[dirPath]) {
+        this.files.setKey(dirPath, { type: 'folder' });
+      }
+    }
+
+    const existing = this.files.get()[filePath];
+
+    if (!existing || existing.type !== 'file') {
+      this.#size++;
+    }
+
+    this.files.setKey(filePath, { type: 'file', content, isBinary: false });
+  }
+
   getFile(filePath: string) {
     const dirent = this.files.get()[filePath];
 

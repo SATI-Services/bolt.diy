@@ -30,10 +30,6 @@ export const CoolifyShareButton = memo(({ chatId }: CoolifyShareButtonProps) => 
   }
 
   return (
-    <IconButton
-      icon="i-ph:share-network"
-      onClick={handleShare}
-      title={`Share Coolify preview: ${container.domain}`}
-    />
+    <IconButton icon="i-ph:share-network" onClick={handleShare} title={`Share Coolify preview: ${container.domain}`} />
   );
 });
