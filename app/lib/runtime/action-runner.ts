@@ -118,10 +118,6 @@ export class ActionRunner {
       },
       abortSignal: abortController.signal,
     });
-
-    this.#currentExecutionPromise.then(() => {
-      this.#updateAction(actionId, { status: 'running' });
-    });
   }
 
   async runAction(data: ActionCallbackData, isStreaming: boolean = false) {
