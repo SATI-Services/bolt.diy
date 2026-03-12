@@ -160,20 +160,22 @@ export class WorkbenchStore {
     const existing = containers[chatId];
 
     if (existing && existing.status === 'running' && existing.wsUrl) {
-      // Already running — reconnect
+      // Already running — reconnect (must await connect before resolving)
       const syncService = getCoolifyFileSyncService();
-      syncService.connect(existing.wsUrl, existing.sidecarToken);
-      this.#injectCoolifyPreview(existing.domain);
       this.#coolifyProvisionChatId = chatId;
-      this.#coolifyProvisionPromise = Promise.resolve(existing);
-      this.coolifyProvisionStatus.set('ready');
+      this.#coolifyProvisionPromise = syncService.connect(existing.wsUrl, existing.sidecarToken).then(() => {
+        this.#injectCoolifyPreview(existing.domain);
+        this.coolifyProvisionStatus.set('ready');
+
+        return existing;
+      });
     } else if (!existing || existing.status === 'error') {
       this.#coolifyProvisionChatId = chatId;
       this.coolifyProvisionStatus.set('provisioning');
-      this.#coolifyProvisionPromise = provisionContainer(chatId).then((container) => {
+      this.#coolifyProvisionPromise = provisionContainer(chatId).then(async (container) => {
         if (container) {
           const syncService = getCoolifyFileSyncService();
-          syncService.connect(container.wsUrl, container.sidecarToken);
+          await syncService.connect(container.wsUrl, container.sidecarToken);
           this.#injectCoolifyPreview(container.domain);
           this.coolifyProvisionStatus.set('ready');
         } else {
@@ -584,8 +586,8 @@ export class WorkbenchStore {
           this.#filesStore.setFileFromAction(fullPath, content);
         };
 
-        artifact.runner.onShellExec = (command) => {
-          return syncService.exec(command);
+        artifact.runner.onShellExec = (command, onOutput) => {
+          return syncService.exec(command, onOutput);
         };
 
         artifact.runner.onPreviewUrl = (url: string) => {

@@ -17,6 +17,7 @@ export type BaseActionState = BoltAction & {
   abort: () => void;
   executed: boolean;
   abortSignal: AbortSignal;
+  shellOutput?: string;
 };
 
 export type FailedActionState = BoltAction &
@@ -27,7 +28,7 @@ export type FailedActionState = BoltAction &
 
 export type ActionState = BaseActionState | FailedActionState;
 
-type BaseActionUpdate = Partial<Pick<BaseActionState, 'status' | 'abort' | 'executed'>>;
+type BaseActionUpdate = Partial<Pick<BaseActionState, 'status' | 'abort' | 'executed' | 'shellOutput'>>;
 
 export type ActionStateUpdate =
   | BaseActionUpdate
@@ -74,7 +75,7 @@ export class ActionRunner {
   onSupabaseAlert?: (alert: SupabaseAlert) => void;
   onDeployAlert?: (alert: DeployAlert) => void;
   onFileWrite?: (path: string, content: string) => void;
-  onShellExec?: (command: string) => Promise<{ exitCode: number; output: string }>;
+  onShellExec?: (command: string, onOutput?: (data: string) => void) => Promise<{ exitCode: number; output: string }>;
   onPreviewUrl?: (url: string) => void;
   coolifyEnabled?: boolean;
   containerReadyPromise?: Promise<unknown>;
@@ -167,7 +168,7 @@ export class ActionRunner {
     try {
       switch (action.type) {
         case 'shell': {
-          await this.#runShellAction(action);
+          await this.#runShellAction(action, actionId);
           break;
         }
         case 'file': {
@@ -266,7 +267,7 @@ export class ActionRunner {
     }
   }
 
-  async #runShellAction(action: ActionState) {
+  async #runShellAction(action: ActionState, actionId?: string) {
     if (action.type !== 'shell') {
       unreachable('Expected shell action');
     }
@@ -287,7 +288,16 @@ export class ActionRunner {
       logger.debug(`[Coolify] Routing shell command to sidecar: ${action.content}`);
 
       if (this.onShellExec) {
-        const result = await this.onShellExec(action.content);
+        const result = await this.onShellExec(action.content, (data: string) => {
+          if (actionId) {
+            const current = this.actions.get()[actionId];
+
+            if (current) {
+              const existing = current.shellOutput || '';
+              this.#updateAction(actionId, { shellOutput: existing + data });
+            }
+          }
+        });
 
         if (result.exitCode !== 0) {
           throw new ActionCommandError(`Shell command failed (exit ${result.exitCode})`, result.output);

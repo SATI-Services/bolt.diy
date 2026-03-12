@@ -3,6 +3,7 @@ import { json, type ActionFunctionArgs } from '@remix-run/cloudflare';
 /**
  * Server-side proxy for sidecar HTTP API calls.
  * Routes browser requests to the sidecar container, avoiding CORS and mixed-content issues.
+ * Supports both JSON responses and SSE streaming (for /exec-stream).
  */
 async function sidecarProxyAction({ request }: ActionFunctionArgs) {
   if (request.method !== 'POST') {
@@ -10,12 +11,13 @@ async function sidecarProxyAction({ request }: ActionFunctionArgs) {
   }
 
   try {
-    const { sidecarUrl, token, endpoint, method, body } = await request.json<{
+    const { sidecarUrl, token, endpoint, method, body, stream } = await request.json<{
       sidecarUrl: string;
       token: string;
       endpoint: string;
       method?: string;
       body?: unknown;
+      stream?: boolean;
     }>();
 
     if (!sidecarUrl || !endpoint) {
@@ -37,6 +39,18 @@ async function sidecarProxyAction({ request }: ActionFunctionArgs) {
       headers,
       body: body ? JSON.stringify(body) : undefined,
     });
+
+    // For streaming responses, pass through the body directly
+    if (stream && response.body) {
+      return new Response(response.body, {
+        status: response.status,
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+        },
+      });
+    }
 
     const data = await response.json();
 

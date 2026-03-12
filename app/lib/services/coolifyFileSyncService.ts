@@ -170,10 +170,15 @@ export class CoolifyFileSyncService {
     }
   }
 
-  async exec(command: string): Promise<{ exitCode: number; output: string }> {
+  async exec(command: string, onOutput?: (data: string) => void): Promise<{ exitCode: number; output: string }> {
     if (!this.#connected) {
       this.#pendingOps.push({ type: 'exec', command });
       return { exitCode: 0, output: 'Queued for sidecar' };
+    }
+
+    // Use streaming exec when an output callback is provided
+    if (onOutput) {
+      return this.#execStream(command, onOutput);
     }
 
     try {
@@ -185,6 +190,66 @@ export class CoolifyFileSyncService {
     } catch (error) {
       logger.error('Exec failed:', error);
       return { exitCode: -1, output: `Sidecar exec error: ${error}` };
+    }
+  }
+
+  async #execStream(command: string, onOutput: (data: string) => void): Promise<{ exitCode: number; output: string }> {
+    try {
+      const response = await fetch('/api/sidecar-proxy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sidecarUrl: this.#sidecarUrl,
+          token: this.#token,
+          endpoint: '/exec-stream',
+          method: 'POST',
+          body: { command },
+          stream: true,
+        }),
+      });
+
+      if (!response.ok || !response.body) {
+        throw new Error(`Stream exec failed: ${response.status}`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let finalResult = { exitCode: 0, output: '' };
+
+      while (true) {
+        const { done, value } = await reader.read();
+
+        if (done) {
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const event = JSON.parse(line.slice(6));
+
+              if (event.type === 'stdout' || event.type === 'stderr') {
+                onOutput(event.data);
+              } else if (event.type === 'exit') {
+                finalResult = { exitCode: event.exitCode, output: event.output };
+              }
+            } catch {
+              // ignore malformed SSE
+            }
+          }
+        }
+      }
+
+      return finalResult;
+    } catch (error) {
+      logger.error('Stream exec failed:', error);
+      return { exitCode: -1, output: `Stream exec error: ${error}` };
     }
   }
 

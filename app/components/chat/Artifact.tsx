@@ -291,12 +291,24 @@ const ActionList = memo(({ actions }: ActionListProps) => {
                 ) : null}
               </div>
               {(type === 'shell' || type === 'start') && (
-                <ShellCodeBlock
-                  classsName={classNames('mt-1', {
-                    'mb-3.5': !isLast,
-                  })}
-                  code={content}
-                />
+                <>
+                  <ShellCodeBlock
+                    classsName={classNames('mt-1', {
+                      'mb-3.5': !isLast && !action.shellOutput,
+                    })}
+                    code={content}
+                  />
+                  {action.shellOutput && (
+                    <pre
+                      className={classNames(
+                        'mt-1 text-xs text-bolt-elements-textSecondary bg-bolt-elements-background-depth-3 rounded-md p-2 max-h-32 overflow-y-auto whitespace-pre-wrap',
+                        { 'mb-3.5': !isLast },
+                      )}
+                    >
+                      {action.shellOutput.length > 2000 ? '...' + action.shellOutput.slice(-2000) : action.shellOutput}
+                    </pre>
+                  )}
+                </>
               )}
             </motion.li>
           );
