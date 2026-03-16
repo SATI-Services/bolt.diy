@@ -73,6 +73,7 @@ export class ActionRunner {
   onFileWrite?: (path: string, content: string) => void;
   onShellExec?: (command: string, onOutput?: (data: string) => void) => Promise<{ exitCode: number; output: string }>;
   onPreviewUrl?: (url: string) => void;
+  onStartServer?: (command: string, port: number) => void;
   containerReadyPromise?: Promise<unknown>;
   buildOutput?: { path: string; exitCode: number; output: string };
 
@@ -321,10 +322,51 @@ export class ActionRunner {
 
     logger.debug(`Routing start command to sidecar: ${action.content}`);
 
+    // Extract port from the command (e.g. --port=8080, --port 3001, -p 4200, :3000)
+    const port = this.#extractPort(action.content);
+
+    // Notify the workbench so it can set the proxy target port
+    if (port) {
+      this.onStartServer?.(action.content, port);
+    }
+
     // Start commands are long-running (dev servers) — fire and don't wait for exit
     if (this.onShellExec) {
       this.onShellExec(action.content);
     }
+  }
+
+  #extractPort(command: string): number | null {
+    // Match common port patterns in dev server commands
+    const patterns = [
+      /--port[=\s]+(\d+)/, // --port=3000 or --port 3000
+      /-p\s+(\d+)/, // -p 3000
+      /:(\d+)/, // listen on :3000, tcp://0.0.0.0:3000
+      /PORT[=\s]+(\d+)/, // PORT=3000
+    ];
+
+    for (const pattern of patterns) {
+      const match = command.match(pattern);
+
+      if (match) {
+        const port = parseInt(match[1], 10);
+
+        if (port > 0 && port <= 65535) {
+          return port;
+        }
+      }
+    }
+
+    // Default ports for known commands
+    if (command.includes('artisan serve')) {
+      return 8000;
+    }
+
+    if (command.includes('npm run dev') || command.includes('npx vite')) {
+      return 5173;
+    }
+
+    return null;
   }
 
   async #runFileAction(action: ActionState) {

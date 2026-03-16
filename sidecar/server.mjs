@@ -16,41 +16,89 @@ if (!TOKEN) {
   process.exit(1);
 }
 
-// ---- Placeholder server on port 3000 for Coolify health checks ----
-// Coolify expects port 3000 to be listening; this placeholder keeps the
-// container marked as "healthy" until the real dev server takes over.
+// ---- Reverse proxy on port 3000 for Coolify ----
+// Coolify expects port 3000 to be listening. Instead of a placeholder that
+// closes (leaving a gap), this is a persistent reverse proxy. The LLM tells
+// us the target port via /set-port, and we forward all traffic there.
 
-const PLACEHOLDER_PORT = 3000;
-let placeholderServer = null;
-let placeholderClosed = false;
+const PROXY_PORT = 3000;
+let targetPort = null; // null = no target yet, show waiting page
 
-function startPlaceholder() {
-  placeholderServer = http.createServer((_req, res) => {
+const proxyServer = http.createServer((req, res) => {
+  if (!targetPort) {
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end('<html><body style="display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;background:#1a1a2e;color:#e0e0e0"><h2>Waiting for dev server...</h2></body></html>');
-  });
-  placeholderServer.on('error', (err) => {
-    if (err.code === 'EADDRINUSE') {
-      console.log(`[Sidecar] Port ${PLACEHOLDER_PORT} already in use, placeholder not needed`);
-      placeholderServer = null;
-      placeholderClosed = true;
-    }
-  });
-  placeholderServer.listen(PLACEHOLDER_PORT, '0.0.0.0', () => {
-    console.log(`[Sidecar] Placeholder health server on port ${PLACEHOLDER_PORT}`);
-  });
-}
-
-function closePlaceholder() {
-  if (placeholderServer && !placeholderClosed) {
-    console.log('[Sidecar] Closing placeholder to free port for dev server');
-    placeholderServer.close();
-    placeholderServer = null;
-    placeholderClosed = true;
+    return;
   }
-}
 
-startPlaceholder();
+  // Proxy the request to the target port
+  const options = {
+    hostname: '127.0.0.1',
+    port: targetPort,
+    path: req.url,
+    method: req.method,
+    headers: req.headers,
+  };
+
+  const proxyReq = http.request(options, (proxyRes) => {
+    res.writeHead(proxyRes.statusCode, proxyRes.headers);
+    proxyRes.pipe(res, { end: true });
+  });
+
+  proxyReq.on('error', (err) => {
+    res.writeHead(502, { 'Content-Type': 'text/html' });
+    res.end(`<html><body style="display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;background:#1a1a2e;color:#e0e0e0"><h2>Dev server not ready (port ${targetPort})</h2><p style="color:#888">${err.message}</p></body></html>`);
+  });
+
+  req.pipe(proxyReq, { end: true });
+});
+
+// Handle WebSocket upgrades (for HMR)
+proxyServer.on('upgrade', (req, socket, head) => {
+  if (!targetPort) {
+    socket.destroy();
+    return;
+  }
+
+  const options = {
+    hostname: '127.0.0.1',
+    port: targetPort,
+    path: req.url,
+    method: req.method,
+    headers: req.headers,
+  };
+
+  const proxyReq = http.request(options);
+  proxyReq.on('upgrade', (proxyRes, proxySocket, proxyHead) => {
+    socket.write(
+      `HTTP/1.1 101 Switching Protocols\r\n` +
+      Object.entries(proxyRes.headers).map(([k, v]) => `${k}: ${v}`).join('\r\n') +
+      '\r\n\r\n'
+    );
+    if (proxyHead.length > 0) socket.write(proxyHead);
+    proxySocket.pipe(socket);
+    socket.pipe(proxySocket);
+  });
+  proxyReq.on('error', () => socket.destroy());
+  proxyReq.end();
+});
+
+proxyServer.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.log(`[Sidecar] Port ${PROXY_PORT} already in use, proxy not needed`);
+  } else {
+    console.error(`[Sidecar] Proxy server error:`, err);
+  }
+});
+
+proxyServer.listen(PROXY_PORT, '0.0.0.0', () => {
+  console.log(`[Sidecar] Reverse proxy listening on port ${PROXY_PORT} (target: none yet)`);
+});
+
+function setTargetPort(port) {
+  targetPort = port;
+  console.log(`[Sidecar] Proxy target set to port ${port}`);
+}
 
 // ---- Shared helpers ----
 
@@ -146,9 +194,6 @@ function handleListFiles(dirPath, maxDepth = 10) {
 }
 
 function execCommand(command) {
-  // Close placeholder before exec so the dev server can bind port 3000
-  closePlaceholder();
-
   return new Promise((resolve) => {
     const proc = spawn('sh', ['-c', command], {
       cwd: WORKDIR,
@@ -175,7 +220,7 @@ function execCommand(command) {
 const wss = new WebSocketServer({ host: '0.0.0.0', port: WS_PORT });
 console.log(`[Sidecar] WebSocket server listening on 0.0.0.0:${WS_PORT}`);
 
-const WATCH_PORTS = [3000, 5173, 4321, 8080];
+const WATCH_PORTS = [8000, 5173, 4321, 8080, 8888, 4200, 3001, 4000];
 let serverReadyNotified = false;
 let detectedPort = null;
 
@@ -189,14 +234,15 @@ function checkPorts(ws) {
   if (serverReadyNotified) return;
 
   for (const port of WATCH_PORTS) {
-    // Skip port 3000 while our placeholder is still running
-    if (port === PLACEHOLDER_PORT && !placeholderClosed) continue;
-
     const server = net.createServer();
     server.once('error', () => {
+      // Port is in use = a dev server is running there
       if (!serverReadyNotified) {
         serverReadyNotified = true;
         detectedPort = port;
+
+        // Auto-set the proxy target
+        setTargetPort(port);
 
         if (ws) {
           sendJson(ws, { type: 'server_ready', port });
@@ -215,9 +261,6 @@ const portCheckInterval = setInterval(() => checkPorts(null), 2000);
 if (portCheckInterval.unref) portCheckInterval.unref();
 
 function handleExecWs(ws, command) {
-  // Close placeholder before exec so the dev server can bind port 3000
-  closePlaceholder();
-
   const proc = spawn('sh', ['-c', command], {
     cwd: WORKDIR,
     env: { ...process.env, HOME: WORKDIR },
@@ -347,7 +390,7 @@ const httpServer = http.createServer(async (req, res) => {
   // Health check
   if (req.url === '/health' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', serverReady: serverReadyNotified, detectedPort }));
+    res.end(JSON.stringify({ status: 'ok', serverReady: serverReadyNotified, detectedPort, targetPort }));
     return;
   }
 
@@ -452,9 +495,20 @@ const httpServer = http.createServer(async (req, res) => {
       const result = await execCommand(body.command);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
+    } else if (req.url === '/set-port' && req.method === 'POST') {
+      const port = parseInt(body?.port, 10);
+      if (!port || port < 1 || port > 65535) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid port number' }));
+      } else {
+        setTargetPort(port);
+        serverReadyNotified = true;
+        detectedPort = port;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ type: 'ok', port, message: `Proxy target set to port ${port}` }));
+      }
     } else if (req.url === '/exec-stream' && req.method === 'POST') {
       // Streaming exec — sends stdout/stderr as SSE, then final exit code
-      closePlaceholder();
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
@@ -663,14 +717,14 @@ terminalWss.on('connection', (ws) => {
 
 process.on('SIGTERM', () => {
   console.log('[Sidecar] Shutting down...');
-  closePlaceholder();
+  proxyServer.close();
   httpServer.close();
   wss.close(() => process.exit(0));
 });
 
 process.on('SIGINT', () => {
   console.log('[Sidecar] Shutting down...');
-  closePlaceholder();
+  proxyServer.close();
   httpServer.close();
   wss.close(() => process.exit(0));
 });

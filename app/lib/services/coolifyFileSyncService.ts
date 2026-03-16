@@ -212,6 +212,19 @@ export class CoolifyFileSyncService {
     }
   }
 
+  async setPort(port: number): Promise<void> {
+    if (!this.#connected) {
+      return;
+    }
+
+    try {
+      await this.#sidecarFetch('/set-port', 'POST', { port });
+      logger.debug(`Proxy target set to port ${port}`);
+    } catch (error) {
+      logger.error('Failed to set proxy port:', error);
+    }
+  }
+
   async exec(command: string, onOutput?: (data: string) => void): Promise<{ exitCode: number; output: string }> {
     if (!this.#connected) {
       this.#pendingOps.push({ type: 'exec', command });

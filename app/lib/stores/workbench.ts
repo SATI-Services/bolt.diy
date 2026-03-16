@@ -677,6 +677,7 @@ export class WorkbenchStore {
     content?: string;
     output?: string;
     exitCode?: number;
+    command?: string;
   }) {
     if (result.type === 'file' && result.status === 'complete' && result.filePath) {
       const fullPath = path.join(WORK_DIR, result.filePath);
@@ -688,6 +689,82 @@ export class WorkbenchStore {
           isBinary: false,
         });
       }
+    }
+
+    // Sync full file tree from container after shell commands (e.g. cp, scaffold, install)
+    if (result.type === 'shell' && result.status === 'complete') {
+      this.syncAgentFilesFromContainer().catch((err: any) => {
+        console.warn('File tree sync after agent shell action failed:', err);
+      });
+    }
+  }
+
+  /**
+   * Sync files from the agent's sidecar container via the HTTP proxy.
+   * Unlike syncFilesFromContainer (which needs a WebSocket connection),
+   * this works in agent mode by calling /api/sidecar-proxy directly.
+   */
+  async syncAgentFilesFromContainer(): Promise<void> {
+    // Find the running container
+    const containers = coolifyContainers.get();
+    const container = Object.values(containers).find((c) => c.status === 'running' && c.wsUrl && c.sidecarToken);
+
+    if (!container) {
+      return;
+    }
+
+    try {
+      // List all files via sidecar proxy
+      const listResp = await fetch('/api/sidecar-proxy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sidecarUrl: container.wsUrl,
+          token: container.sidecarToken,
+          endpoint: '/list-files',
+          body: { path: '.', maxDepth: 10 },
+        }),
+      });
+
+      if (!listResp.ok) {
+        return;
+      }
+
+      const data = (await listResp.json()) as { files?: Record<string, { type: string; size?: number }> };
+      const fileList = data.files || {};
+
+      // Read each file we don't already have
+      for (const [relativePath, info] of Object.entries(fileList)) {
+        const fullPath = `${WORK_DIR}/${relativePath}`;
+
+        if (info.type === 'directory' || info.type === 'folder') {
+          if (!this.files.get()[fullPath]) {
+            this.files.setKey(fullPath, { type: 'folder' });
+          }
+        } else if (!this.files.get()[fullPath]) {
+          // Read file content
+          const readResp = await fetch('/api/sidecar-proxy', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sidecarUrl: container.wsUrl,
+              token: container.sidecarToken,
+              endpoint: '/read',
+              body: { path: relativePath },
+            }),
+          });
+
+          if (readResp.ok) {
+            const fileData = (await readResp.json()) as { content?: string };
+
+            if (fileData.content) {
+              this.files.setKey(fullPath, { type: 'file', content: fileData.content, isBinary: false });
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('Agent file sync failed:', err);
     }
   }
 
@@ -775,6 +852,11 @@ export class WorkbenchStore {
 
       createdArtifact.runner.onPreviewUrl = (url: string) => {
         this.#injectCoolifyPreview(url);
+      };
+
+      createdArtifact.runner.onStartServer = (_command: string, port: number) => {
+        // Tell the sidecar's reverse proxy what port to forward to
+        syncService.setPort(port);
       };
 
       // When sidecar reports dev server ready, inject preview
