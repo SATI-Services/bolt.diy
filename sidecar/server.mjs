@@ -215,6 +215,19 @@ function execCommand(command) {
   });
 }
 
+function execDetached(command) {
+  const proc = spawn('sh', ['-c', command], {
+    cwd: WORKDIR,
+    env: { ...process.env, HOME: WORKDIR },
+    detached: true,
+    stdio: 'ignore',
+  });
+
+  proc.unref();
+
+  return { pid: proc.pid };
+}
+
 // ---- WebSocket server (original protocol) ----
 
 const wss = new WebSocketServer({ host: '0.0.0.0', port: WS_PORT });
@@ -493,6 +506,10 @@ const httpServer = http.createServer(async (req, res) => {
       res.end(JSON.stringify(result));
     } else if (req.url === '/exec' && req.method === 'POST') {
       const result = await execCommand(body.command);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
+    } else if (req.url === '/exec-detached' && req.method === 'POST') {
+      const result = execDetached(body.command);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
     } else if (req.url === '/set-port' && req.method === 'POST') {

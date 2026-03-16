@@ -96,11 +96,18 @@ async function createContainer() {
 
   const labels = {
     'traefik.enable': 'true',
-    // App router (port 3000)
-    [`traefik.http.routers.${shortId}.rule`]: `Host(\`${domain}\`)`,
+    // App router (port 3000) — serves the dev server preview
+    [`traefik.http.routers.${shortId}.rule`]: `Host(\`${domain}\`) && !PathPrefix(\`/_sidecar\`)`,
     [`traefik.http.routers.${shortId}.tls`]: 'true',
     [`traefik.http.routers.${shortId}.tls.certresolver`]: 'letsencrypt',
     [`traefik.http.services.${shortId}.loadbalancer.server.port`]: '3000',
+    // Sidecar router (port 9839) — exposes sidecar HTTP API + terminal WebSocket at /_sidecar/
+    [`traefik.http.routers.${shortId}-sidecar.rule`]: `Host(\`${domain}\`) && PathPrefix(\`/_sidecar\`)`,
+    [`traefik.http.routers.${shortId}-sidecar.tls`]: 'true',
+    [`traefik.http.routers.${shortId}-sidecar.tls.certresolver`]: 'letsencrypt',
+    [`traefik.http.services.${shortId}-sidecar.loadbalancer.server.port`]: '9839',
+    [`traefik.http.middlewares.${shortId}-sidecar-strip.stripprefix.prefixes`]: '/_sidecar',
+    [`traefik.http.routers.${shortId}-sidecar.middlewares`]: `${shortId}-sidecar-strip`,
     // Management labels
     'bolt.pool.managed': 'true',
     'bolt.pool.id': shortId,
@@ -442,6 +449,51 @@ process.on('uncaughtException', (err) => {
 });
 
 // ---------------------------------------------------------------------------
+// Orphan cleanup — remove stale containers from previous pool manager runs
+// ---------------------------------------------------------------------------
+
+async function cleanupOrphans() {
+  log('info', 'Cleaning up orphaned containers...');
+
+  try {
+    const containers = await docker.listContainers({
+      all: true,
+      filters: { label: ['bolt.pool.managed=true'] },
+    });
+
+    const knownIds = new Set(pool.keys());
+    let cleaned = 0;
+
+    for (const containerInfo of containers) {
+      const shortId = containerInfo.Labels?.['bolt.pool.id'];
+
+      // If this container is not in our in-memory pool, it's an orphan
+      if (!shortId || !knownIds.has(shortId)) {
+        const name = containerInfo.Names?.[0]?.replace(/^\//, '') || containerInfo.Id.slice(0, 12);
+        log('info', 'Removing orphaned container', { name, id: containerInfo.Id.slice(0, 12) });
+
+        try {
+          const container = docker.getContainer(containerInfo.Id);
+
+          if (containerInfo.State === 'running') {
+            await container.stop({ t: 5 }).catch(() => {});
+          }
+
+          await container.remove({ force: true });
+          cleaned++;
+        } catch (err) {
+          log('warn', 'Failed to remove orphan', { name, error: err.message });
+        }
+      }
+    }
+
+    log('info', 'Orphan cleanup complete', { found: containers.length, cleaned });
+  } catch (err) {
+    log('error', 'Orphan cleanup failed', { error: err.message });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Startup
 // ---------------------------------------------------------------------------
 
@@ -468,6 +520,9 @@ server.listen(CONFIG.port, async () => {
     log('error', 'Ensure /var/run/docker.sock is mounted and accessible');
     process.exit(1);
   }
+
+  // Clean up orphaned containers from previous runs before filling the pool
+  await cleanupOrphans();
 
   // Fill the pool
   await fillPool();

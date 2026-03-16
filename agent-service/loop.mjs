@@ -472,8 +472,15 @@ function createTools(session, sessionId) {
           action: { id: actionId, type: 'start', content: command },
         });
 
-        // Fire and don't wait
-        sidecarFetch(sidecarUrl, sidecarToken, '/exec', { command }).catch(() => {});
+        try {
+          // Use /exec-detached so the HTTP request returns immediately
+          // instead of hanging until the dev server exits (which is never)
+          const result = await sidecarFetch(sidecarUrl, sidecarToken, '/exec-detached', { command });
+          log('info', 'Dev server started (detached)', { sessionId, pid: result?.pid });
+        } catch (err) {
+          log('warn', 'exec-detached failed, falling back to fire-and-forget /exec', { sessionId, error: err.message });
+          sidecarFetch(sidecarUrl, sidecarToken, '/exec', { command }).catch(() => {});
+        }
 
         // Give server a moment to start
         await sleep(3000);

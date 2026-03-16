@@ -239,19 +239,23 @@ export const ChatImpl = memo(
       chatStore.setKey('started', initialMessages.length > 0);
     }, []);
 
-    // Inject preview when agent container is available
+    /*
+     * Inject preview when agent container is available.
+     * Use useStore so the effect re-fires when coolifyContainers changes.
+     */
+    const coolifyContainersValue = useStore(coolifyContainers);
+
     useEffect(() => {
       if (!agentMode) {
         return;
       }
 
-      const containers = coolifyContainers.get();
       const sid = agentChat.sessionId;
 
-      if (sid && containers[sid]?.domain) {
-        workbenchStore.injectAgentPreview(containers[sid].domain);
+      if (sid && coolifyContainersValue[sid]?.domain) {
+        workbenchStore.injectAgentPreview(coolifyContainersValue[sid].domain);
       }
-    }, [agentChat.sessionId, agentChat.status]);
+    }, [agentChat.sessionId, coolifyContainersValue]);
 
     // Seed agent chat with messages restored from IndexedDB on reload
     useEffect(() => {

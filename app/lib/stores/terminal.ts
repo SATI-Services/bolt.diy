@@ -64,13 +64,26 @@ export class TerminalStore {
       }
     }
 
-    const sidecarUrl = container.wsUrl;
     const sidecarToken = container.sidecarToken;
 
     try {
-      // Connect via the proxy route
-      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${wsProtocol}//${window.location.host}/api/sidecar-terminal?sidecarUrl=${encodeURIComponent(sidecarUrl)}&token=${encodeURIComponent(sidecarToken)}`;
+      /*
+       * Connect directly to the sidecar's /terminal endpoint via Traefik's /_sidecar/ path.
+       * This bypasses the wrangler proxy which doesn't reliably handle outbound WebSockets.
+       */
+      let wsUrl: string;
+
+      if (container.domain) {
+        const rawDomain = container.domain.startsWith('http') ? container.domain : `https://${container.domain}`;
+        const domainUrl = new URL(rawDomain);
+        const wsProtocol = domainUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+        wsUrl = `${wsProtocol}//${domainUrl.host}/_sidecar/terminal?token=${encodeURIComponent(sidecarToken)}`;
+      } else {
+        // Fallback to the proxy route if no domain is available
+        const sidecarUrl = container.wsUrl;
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        wsUrl = `${wsProtocol}//${window.location.host}/api/sidecar-terminal?sidecarUrl=${encodeURIComponent(sidecarUrl)}&token=${encodeURIComponent(sidecarToken)}`;
+      }
 
       const ws = new WebSocket(wsUrl);
 

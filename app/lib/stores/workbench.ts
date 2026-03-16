@@ -408,6 +408,21 @@ export class WorkbenchStore {
 
   setSelectedFile(filePath: string | undefined) {
     this.#editorStore.setSelectedFile(filePath);
+
+    /*
+     * On-demand loading: if the file is a stub (empty content from syncAgentFilesFromContainer),
+     * fetch the actual content from the sidecar container.
+     */
+    if (filePath) {
+      const fileEntry = this.files.get()[filePath];
+
+      if (fileEntry?.type === 'file' && fileEntry.content === '' && !fileEntry.isBinary) {
+        const relativePath = filePath.replace(WORK_DIR + '/', '');
+        this.readAgentFile(relativePath).catch(() => {
+          // Ignore — file may not exist or sidecar may be unreachable
+        });
+      }
+    }
   }
 
   async saveFile(filePath: string) {
@@ -700,9 +715,12 @@ export class WorkbenchStore {
   }
 
   /**
-   * Sync files from the agent's sidecar container via the HTTP proxy.
-   * Unlike syncFilesFromContainer (which needs a WebSocket connection),
-   * this works in agent mode by calling /api/sidecar-proxy directly.
+   * Sync file tree structure from the agent's sidecar container.
+   * Only populates folder structure and file stubs — content is loaded on-demand
+   * via readAgentFile() when a file is selected in the editor.
+   *
+   * Tries the direct Traefik /_sidecar/ route first (faster, avoids wrangler proxy),
+   * then falls back to /api/sidecar-proxy.
    */
   async syncAgentFilesFromContainer(): Promise<void> {
     // Find the running container
@@ -710,30 +728,61 @@ export class WorkbenchStore {
     const container = Object.values(containers).find((c) => c.status === 'running' && c.wsUrl && c.sidecarToken);
 
     if (!container) {
+      console.warn('[syncAgentFiles] No running container found');
       return;
     }
 
     try {
-      // List all files via sidecar proxy
-      const listResp = await fetch('/api/sidecar-proxy', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          sidecarUrl: container.wsUrl,
-          token: container.sidecarToken,
-          endpoint: '/list-files',
-          body: { path: '.', maxDepth: 10 },
-        }),
-      });
+      let data: { files?: Record<string, { type: string; size?: number; tooLarge?: boolean }> } | null = null;
 
-      if (!listResp.ok) {
-        return;
+      // Try direct sidecar route via Traefik first
+      if (container.domain) {
+        const domainUrl = container.domain.startsWith('http') ? container.domain : `https://${container.domain}`;
+
+        try {
+          const directResp = await fetch(`${domainUrl}/_sidecar/list-files`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${container.sidecarToken}`,
+            },
+            body: JSON.stringify({ path: '.', maxDepth: 10 }),
+          });
+
+          if (directResp.ok) {
+            data = await directResp.json();
+          } else {
+            console.warn(`[syncAgentFiles] Direct sidecar route failed (${directResp.status}), falling back to proxy`);
+          }
+        } catch (directErr) {
+          console.warn('[syncAgentFiles] Direct sidecar route error, falling back to proxy:', directErr);
+        }
       }
 
-      const data = (await listResp.json()) as { files?: Record<string, { type: string; size?: number }> };
-      const fileList = data.files || {};
+      // Fallback to the proxy route
+      if (!data) {
+        const listResp = await fetch('/api/sidecar-proxy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sidecarUrl: container.wsUrl,
+            token: container.sidecarToken,
+            endpoint: '/list-files',
+            body: { path: '.', maxDepth: 10 },
+          }),
+        });
 
-      // Read each file we don't already have
+        if (!listResp.ok) {
+          console.warn(`[syncAgentFiles] Proxy list-files failed (${listResp.status})`);
+          return;
+        }
+
+        data = await listResp.json();
+      }
+
+      const fileList = data?.files || {};
+
+      // Populate tree structure — folders and file stubs (no content yet)
       for (const [relativePath, info] of Object.entries(fileList)) {
         const fullPath = `${WORK_DIR}/${relativePath}`;
 
@@ -742,29 +791,81 @@ export class WorkbenchStore {
             this.files.setKey(fullPath, { type: 'folder' });
           }
         } else if (!this.files.get()[fullPath]) {
-          // Read file content
-          const readResp = await fetch('/api/sidecar-proxy', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              sidecarUrl: container.wsUrl,
-              token: container.sidecarToken,
-              endpoint: '/read',
-              body: { path: relativePath },
-            }),
-          });
-
-          if (readResp.ok) {
-            const fileData = (await readResp.json()) as { content?: string };
-
-            if (fileData.content) {
-              this.files.setKey(fullPath, { type: 'file', content: fileData.content, isBinary: false });
-            }
-          }
+          // Insert a file stub — content will be loaded on-demand
+          this.files.setKey(fullPath, { type: 'file', content: '', isBinary: false });
         }
       }
     } catch (err) {
-      console.warn('Agent file sync failed:', err);
+      console.warn('[syncAgentFiles] Agent file sync failed:', err);
+    }
+  }
+
+  /**
+   * Read a single file's content from the agent's sidecar container on-demand.
+   * Called when a file stub (empty content) is selected in the editor.
+   */
+  async readAgentFile(relativePath: string): Promise<string | null> {
+    const containers = coolifyContainers.get();
+    const container = Object.values(containers).find((c) => c.status === 'running' && c.wsUrl && c.sidecarToken);
+
+    if (!container) {
+      return null;
+    }
+
+    try {
+      let fileData: { content?: string; isBinary?: boolean } | null = null;
+
+      // Try direct sidecar route via Traefik first
+      if (container.domain) {
+        const domainUrl = container.domain.startsWith('http') ? container.domain : `https://${container.domain}`;
+
+        try {
+          const resp = await fetch(`${domainUrl}/_sidecar/read`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${container.sidecarToken}`,
+            },
+            body: JSON.stringify({ path: relativePath }),
+          });
+
+          if (resp.ok) {
+            fileData = await resp.json();
+          }
+        } catch {
+          // Fall through to proxy
+        }
+      }
+
+      // Fallback to proxy
+      if (!fileData) {
+        const resp = await fetch('/api/sidecar-proxy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sidecarUrl: container.wsUrl,
+            token: container.sidecarToken,
+            endpoint: '/read',
+            body: { path: relativePath },
+          }),
+        });
+
+        if (resp.ok) {
+          fileData = await resp.json();
+        }
+      }
+
+      if (fileData?.content) {
+        const fullPath = `${WORK_DIR}/${relativePath}`;
+        this.files.setKey(fullPath, { type: 'file', content: fileData.content, isBinary: false });
+
+        return fileData.content;
+      }
+
+      return null;
+    } catch (err) {
+      console.warn(`[readAgentFile] Failed to read ${relativePath}:`, err);
+      return null;
     }
   }
 
