@@ -238,6 +238,18 @@ export const ChatImpl = memo(
       chatStore.setKey('started', initialMessages.length > 0);
     }, []);
 
+    // Seed agent chat with messages restored from IndexedDB on reload
+    useEffect(() => {
+      if (agentMode && initialMessages.length > 0 && agentChat.messages.length === 0) {
+        const restoredMessages = initialMessages.map((m) => ({
+          id: m.id,
+          role: m.role as 'user' | 'assistant' | 'system' | 'execution_result',
+          content: typeof m.content === 'string' ? m.content : '',
+        }));
+        agentChat.setMessages(restoredMessages);
+      }
+    }, [initialMessages]);
+
     useEffect(() => {
       processSampledMessages({
         messages,

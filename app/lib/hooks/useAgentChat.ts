@@ -474,6 +474,7 @@ export function useAgentChat(options: UseAgentChatOptions = {}) {
     sendMessage,
     stop,
     setSessionId,
+    setMessages,
     connectSSE,
   };
 }

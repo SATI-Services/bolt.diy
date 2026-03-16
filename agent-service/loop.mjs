@@ -540,12 +540,15 @@ function createTools(session, sessionId) {
             await upsertFile(sessionId, f.path, f.content);
           }
 
-          const paths = files.map((f) => f.path).join(', ');
+          // Emit per-file action-complete so the workbench receives each file's content
+          for (const f of files) {
+            emitSSE(sessionId, {
+              type: 'action-complete',
+              result: { id: crypto.randomUUID(), type: 'file', status: 'complete', filePath: f.path, content: f.content },
+            });
+          }
 
-          emitSSE(sessionId, {
-            type: 'action-complete',
-            result: { id: actionId, type: 'file', status: 'complete', filePath: paths },
-          });
+          const paths = files.map((f) => f.path).join(', ');
 
           return `Successfully wrote ${files.length} files: ${paths}`;
         } catch (err) {
