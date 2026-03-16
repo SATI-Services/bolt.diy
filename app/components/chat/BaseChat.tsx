@@ -480,7 +480,7 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
                   providerList={providerList || (PROVIDER_LIST as ProviderInfo[])}
                   model={model}
                   setModel={setModel}
-                  modelList={modelList}
+                  modelList={agentMode ? modelList.filter((m) => m.supportsToolUse !== false) : modelList}
                   apiKeys={apiKeys}
                   isModelLoading={isModelLoading}
                   onApiKeysChange={onApiKeysChange}
