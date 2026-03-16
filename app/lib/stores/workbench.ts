@@ -649,6 +649,44 @@ export class WorkbenchStore {
     // TODO: what do we wanna do and how do we wanna recover from this?
   }
 
+  /*
+   * ---------------------------------------------------------------------------
+   * Agent mode: handle SSE events from the agent service
+   * ---------------------------------------------------------------------------
+   */
+
+  handleAgentActionStart(action: { id: string; type: string; content?: string; filePath?: string }) {
+    // Show workbench when actions start
+    this.showWorkbench.set(true);
+
+    if (action.type === 'file' && action.filePath) {
+      const fullPath = path.join(WORK_DIR, action.filePath);
+      this.setSelectedFile(fullPath);
+    }
+  }
+
+  handleAgentActionComplete(result: {
+    id: string;
+    type: string;
+    status: string;
+    filePath?: string;
+    content?: string;
+    output?: string;
+    exitCode?: number;
+  }) {
+    if (result.type === 'file' && result.status === 'complete' && result.filePath) {
+      const fullPath = path.join(WORK_DIR, result.filePath);
+
+      if (result.content) {
+        this.files.setKey(fullPath, {
+          type: 'file',
+          content: result.content,
+          isBinary: false,
+        });
+      }
+    }
+  }
+
   setReloadedMessages(messages: string[]) {
     this.#reloadedMessages = new Set(messages);
   }

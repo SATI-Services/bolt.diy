@@ -1,5 +1,5 @@
 import type { Message } from 'ai';
-import { Fragment } from 'react';
+import { Fragment, useState } from 'react';
 import { classNames } from '~/utils/classNames';
 import { AssistantMessage } from './AssistantMessage';
 import { UserMessage } from './UserMessage';
@@ -57,9 +57,15 @@ export const Messages = forwardRef<HTMLDivElement, MessagesProps>(
               const isUserMessage = role === 'user';
               const isFirst = index === 0;
               const isHidden = annotations?.includes('hidden');
+              const isExecutionResult = annotations?.includes('execution_result');
 
               if (isHidden) {
                 return <Fragment key={index} />;
+              }
+
+              // Compact rendering for agent execution results
+              if (isExecutionResult) {
+                return <ExecutionResultMessage key={index} content={content} isFirst={isFirst} />;
               }
 
               return (
@@ -100,3 +106,62 @@ export const Messages = forwardRef<HTMLDivElement, MessagesProps>(
     );
   },
 );
+
+// Compact execution result message for agent mode
+function ExecutionResultMessage({ content, isFirst }: { content: string; isFirst: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+
+  let results: any[] = [];
+
+  try {
+    results = JSON.parse(content);
+  } catch {
+    // Not JSON — just show raw
+    return (
+      <div className={classNames('px-4 py-2 text-sm text-bolt-elements-textSecondary', { 'mt-4': !isFirst })}>
+        {content}
+      </div>
+    );
+  }
+
+  const succeeded = results.filter((r: any) => r.status === 'complete' || r.status === 'running').length;
+  const failed = results.filter((r: any) => r.status === 'failed').length;
+  const total = results.length;
+
+  return (
+    <div className={classNames('px-4 py-2', { 'mt-2': !isFirst })}>
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-2 text-sm text-bolt-elements-textSecondary hover:text-bolt-elements-textPrimary transition-colors w-full text-left"
+      >
+        <span className={expanded ? 'i-ph:caret-down' : 'i-ph:caret-right'} />
+        <span>
+          {total} action{total !== 1 ? 's' : ''} ({succeeded} succeeded
+          {failed > 0 ? `, ${failed} failed` : ''})
+        </span>
+        {failed > 0 && <span className="i-ph:warning text-bolt-elements-button-danger-text" />}
+      </button>
+      {expanded && (
+        <div className="mt-2 ml-5 space-y-1 text-xs font-mono text-bolt-elements-textSecondary border-l-2 border-bolt-elements-borderColor pl-3">
+          {results.map((r: any, i: number) => (
+            <div key={i} className="flex items-start gap-2">
+              <span
+                className={
+                  r.status === 'failed' ? 'text-bolt-elements-button-danger-text' : 'text-bolt-elements-icon-success'
+                }
+              >
+                {r.status === 'failed' ? 'FAIL' : 'OK'}
+              </span>
+              <span>{r.type === 'file' ? `file: ${r.filePath}` : `${r.type}: ${r.command || r.content || ''}`}</span>
+              {r.output && r.status === 'failed' && (
+                <pre className="mt-1 whitespace-pre-wrap text-bolt-elements-button-danger-text opacity-80 max-h-20 overflow-auto">
+                  {r.output.slice(0, 500)}
+                </pre>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}

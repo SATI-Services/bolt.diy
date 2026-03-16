@@ -29,6 +29,7 @@ import type { ElementInfo } from '~/components/workbench/Inspector';
 import type { TextUIPart, FileUIPart, Attachment } from '@ai-sdk/ui-utils';
 import { useMCPStore } from '~/lib/stores/mcp';
 import type { LlmErrorAlertType } from '~/types/actions';
+import { useAgentChat } from '~/lib/hooks/useAgentChat';
 
 const logger = createScopedLogger('Chat');
 
@@ -128,6 +129,38 @@ export const ChatImpl = memo(
     const [selectedElement, setSelectedElement] = useState<ElementInfo | null>(null);
     const mcpSettings = useMCPStore((state) => state.settings);
     const pendingMessageRef = useRef<string | null>(null);
+
+    // Agent mode state
+    const [agentMode, setAgentMode] = useState(() => {
+      return Cookies.get('agentMode') === 'true';
+    });
+
+    const handleAgentModeChange = useCallback((enabled: boolean) => {
+      setAgentMode(enabled);
+      Cookies.set('agentMode', String(enabled), { expires: 30 });
+    }, []);
+
+    // Agent chat hook (only active when agentMode is on)
+    const agentChat = useAgentChat({
+      sessionId: agentMode ? chatId.get() || undefined : undefined,
+      onActionStart: (action) => {
+        if (agentMode) {
+          workbenchStore.handleAgentActionStart(action);
+        }
+      },
+      onActionComplete: (result) => {
+        if (agentMode) {
+          workbenchStore.handleAgentActionComplete(result);
+        }
+      },
+      onDone: (reason) => {
+        logger.info('Agent loop done', { reason });
+      },
+      onError: (error) => {
+        logger.error('Agent loop error', { error });
+        toast.error(`Agent error: ${error}`);
+      },
+    });
 
     const {
       messages,
@@ -255,6 +288,14 @@ export const ChatImpl = memo(
     };
 
     const abort = () => {
+      // In agent mode, stop via agent service
+      if (agentMode && agentChat.status === 'running') {
+        agentChat.stop();
+        chatStore.setKey('aborted', true);
+
+        return;
+      }
+
       stop();
       chatStore.setKey('aborted', true);
       workbenchStore.abortAllActions();
@@ -441,6 +482,36 @@ export const ChatImpl = memo(
       const messageContent = messageInput || input;
 
       if (!messageContent?.trim()) {
+        return;
+      }
+
+      // Agent mode: dispatch through agent service
+      if (agentMode) {
+        runAnimation();
+        setInput('');
+        Cookies.remove(PROMPT_COOKIE_KEY);
+
+        try {
+          // Create session if needed
+          if (!agentChat.sessionId) {
+            const sessionOpts = {
+              id: chatId.get() || undefined,
+              provider: provider.name,
+              model,
+              title: messageContent.slice(0, 100),
+            };
+            await agentChat.createSession(sessionOpts);
+          }
+
+          // Send message via agent service
+          await agentChat.sendMessage(messageContent, {
+            provider: provider.name,
+            model,
+          });
+        } catch (err: any) {
+          toast.error(`Agent error: ${err.message}`);
+        }
+
         return;
       }
 
@@ -700,7 +771,7 @@ export const ChatImpl = memo(
         input={input}
         showChat={showChat}
         chatStarted={chatStarted}
-        isStreaming={isLoading || fakeLoading}
+        isStreaming={isLoading || fakeLoading || (agentMode && agentChat.isStreaming)}
         onStreamingChange={(streaming) => {
           streamingState.set(streaming);
         }}
@@ -720,16 +791,43 @@ export const ChatImpl = memo(
         description={description}
         importChat={importChat}
         exportChat={exportChat}
-        messages={messages.map((message, i) => {
-          if (message.role === 'user') {
-            return message;
-          }
+        messages={
+          agentMode
+            ? // Agent mode: convert agent messages to Message format
+              [
+                ...agentChat.messages.map(
+                  (m) =>
+                    ({
+                      id: m.id,
+                      role: m.role === 'execution_result' ? ('assistant' as const) : (m.role as 'user' | 'assistant'),
+                      content: m.content,
+                      annotations: m.annotations?.type === 'execution_result' ? ['execution_result'] : undefined,
+                    }) as Message,
+                ),
 
-          return {
-            ...message,
-            content: parsedMessages[i] || '',
-          };
-        })}
+                // Append streaming content as a partial assistant message
+                ...(agentChat.streamingContent
+                  ? [
+                      {
+                        id: 'streaming',
+                        role: 'assistant' as const,
+                        content: agentChat.streamingContent,
+                      },
+                    ]
+                  : []),
+              ]
+            : // Normal mode: use parsed messages
+              messages.map((message, i) => {
+                if (message.role === 'user') {
+                  return message;
+                }
+
+                return {
+                  ...message,
+                  content: parsedMessages[i] || '',
+                };
+              })
+        }
         enhancePrompt={() => {
           enhancePrompt(
             input,
@@ -764,6 +862,11 @@ export const ChatImpl = memo(
         setSelectedElement={setSelectedElement}
         addToolResult={addToolResult}
         onWebSearchResult={handleWebSearchResult}
+        agentMode={agentMode}
+        setAgentMode={handleAgentModeChange}
+        agentIteration={agentMode ? agentChat.iteration : undefined}
+        agentStatus={agentMode ? agentChat.status : undefined}
+        agentCurrentAction={agentMode ? agentChat.currentAction : undefined}
       />
     );
   },

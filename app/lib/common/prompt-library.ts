@@ -8,6 +8,7 @@ export interface PromptOptions {
   allowedHtmlElements: string[];
   modificationTagName: string;
   designScheme?: DesignScheme;
+  agentLoopEnabled?: boolean;
   supabase?: {
     isConnected: boolean;
     hasSelectedProject: boolean;
@@ -30,12 +31,13 @@ export class PromptLibrary {
     default: {
       label: 'Default Prompt',
       description: 'An fine tuned prompt for better results and less token usage',
-      get: (options) => getFineTunedPrompt(options.cwd, options.supabase, options.designScheme),
+      get: (options) =>
+        getFineTunedPrompt(options.cwd, options.supabase, options.designScheme, options.agentLoopEnabled),
     },
     original: {
       label: 'Old Default Prompt',
       description: 'The OG battle tested default system Prompt',
-      get: (options) => getSystemPrompt(options.cwd, options.supabase, options.designScheme),
+      get: (options) => getSystemPrompt(options.cwd, options.supabase, options.designScheme, options.agentLoopEnabled),
     },
     optimized: {
       label: 'Optimized Prompt (experimental)',

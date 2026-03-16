@@ -82,6 +82,11 @@ interface BaseChatProps {
   setSelectedElement?: (element: ElementInfo | null) => void;
   addToolResult?: ({ toolCallId, result }: { toolCallId: string; result: any }) => void;
   onWebSearchResult?: (result: string) => void;
+  agentMode?: boolean;
+  setAgentMode?: (enabled: boolean) => void;
+  agentIteration?: { n: number; max: number };
+  agentStatus?: string;
+  agentCurrentAction?: string | null;
 }
 
 export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
@@ -132,6 +137,10 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
         throw new Error('addToolResult not implemented');
       },
       onWebSearchResult,
+      agentMode,
+      agentIteration,
+      agentStatus,
+      agentCurrentAction,
     },
     ref,
   ) => {
@@ -441,7 +450,7 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
                       }}
                     />
                   )}
-                  {actionAlert && (
+                  {actionAlert && !(agentMode && agentStatus === 'running') && (
                     <ChatAlert
                       alert={actionAlert}
                       clearAlert={() => clearAlert?.()}
@@ -454,6 +463,15 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
                   {llmErrorAlert && <LlmErrorAlert alert={llmErrorAlert} clearAlert={() => clearLlmErrorAlert?.()} />}
                 </div>
                 {progressAnnotations && <ProgressCompilation data={progressAnnotations} />}
+                {agentMode && agentStatus === 'running' && agentIteration && (
+                  <div className="flex items-center gap-2 px-4 py-2 text-sm text-bolt-elements-textSecondary bg-bolt-elements-background-depth-2 rounded-lg mb-2">
+                    <div className="i-svg-spinners:ring-resize text-bolt-elements-item-contentAccent" />
+                    <span>
+                      Agent: step {agentIteration.n}/{agentIteration.max}
+                      {agentCurrentAction ? ` — running \`${agentCurrentAction}\`` : ' — thinking...'}
+                    </span>
+                  </div>
+                )}
                 <ChatBox
                   isModelSettingsCollapsed={isModelSettingsCollapsed}
                   setIsModelSettingsCollapsed={setIsModelSettingsCollapsed}
