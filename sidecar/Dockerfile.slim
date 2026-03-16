@@ -3,7 +3,7 @@ FROM node:20-bookworm-slim
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential git curl wget ca-certificates procps \
+    build-essential git curl wget ca-certificates procps unzip \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g pnpm typescript tsx vite && \
