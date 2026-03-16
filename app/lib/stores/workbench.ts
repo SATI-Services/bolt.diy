@@ -665,6 +665,10 @@ export class WorkbenchStore {
     }
   }
 
+  injectAgentPreview(domain: string) {
+    this.#injectCoolifyPreview(domain);
+  }
+
   handleAgentActionComplete(result: {
     id: string;
     type: string;

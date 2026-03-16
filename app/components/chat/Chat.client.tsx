@@ -9,6 +9,7 @@ import { chatId, description, useChatHistory } from '~/lib/persistence';
 import { description as descriptionAtom } from '~/lib/persistence/useChatHistory';
 import { chatStore } from '~/lib/stores/chat';
 import { workbenchStore } from '~/lib/stores/workbench';
+import { coolifyContainers } from '~/lib/stores/coolifyPreview';
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, PROMPT_COOKIE_KEY, PROVIDER_LIST } from '~/utils/constants';
 import { cubicEasingFn } from '~/utils/easings';
 import { createScopedLogger, renderLogger } from '~/utils/logger';
@@ -237,6 +238,20 @@ export const ChatImpl = memo(
     useEffect(() => {
       chatStore.setKey('started', initialMessages.length > 0);
     }, []);
+
+    // Inject preview when agent container is available
+    useEffect(() => {
+      if (!agentMode) {
+        return;
+      }
+
+      const containers = coolifyContainers.get();
+      const sid = agentChat.sessionId;
+
+      if (sid && containers[sid]?.domain) {
+        workbenchStore.injectAgentPreview(containers[sid].domain);
+      }
+    }, [agentChat.sessionId, agentChat.status]);
 
     // Seed agent chat with messages restored from IndexedDB on reload
     useEffect(() => {

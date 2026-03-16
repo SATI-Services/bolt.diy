@@ -104,9 +104,9 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
     !activePreview &&
     Object.values(coolifyContainersValue).some((c: any) => c.status === 'provisioning' || c.status === 'running');
 
-  // Check if a URL is a Coolify preview URL
+  // Check if a URL is a Coolify/pool preview URL
   const isCoolifyUrl = useCallback((url: string) => {
-    return url.includes('bolt-preview-') && url.includes('.bolt.rdrt.org');
+    return (url.includes('bolt-preview-') || url.includes('bolt-pool-')) && url.includes('.bolt.rdrt.org');
   }, []);
 
   useEffect(() => {
