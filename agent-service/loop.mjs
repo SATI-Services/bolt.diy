@@ -420,26 +420,45 @@ export async function runAgentLoop(sessionId) {
           emitSSE(sessionId, { type: 'text-delta', delta: chunk.textDelta });
           break;
 
-        case 'tool-call':
-          log('debug', 'Tool call', {
-            sessionId,
-            tool: chunk.toolName,
+        case 'tool-call': {
+          const toolLabel = formatToolCallLabel(chunk.toolName, chunk.args);
+
+          log('debug', 'Tool call', { sessionId, tool: chunk.toolName, label: toolLabel });
+
+          // Emit a rich event so the client can render tool calls inline in the chat
+          emitSSE(sessionId, {
+            type: 'tool-call',
+            toolName: chunk.toolName,
             args: chunk.toolName === 'writeFile'
               ? { path: chunk.args.path, contentLength: chunk.args.content?.length }
               : chunk.args,
+            label: toolLabel,
           });
           break;
+        }
 
-        case 'tool-result':
-          log('debug', 'Tool result', {
-            sessionId,
-            tool: chunk.toolName,
-            resultLength: typeof chunk.result === 'string' ? chunk.result.length : 0,
+        case 'tool-result': {
+          const resultPreview = typeof chunk.result === 'string'
+            ? chunk.result.slice(0, 300)
+            : JSON.stringify(chunk.result).slice(0, 300);
+
+          log('debug', 'Tool result', { sessionId, tool: chunk.toolName, resultLength: resultPreview.length });
+
+          emitSSE(sessionId, {
+            type: 'tool-result',
+            toolName: chunk.toolName,
+            result: resultPreview,
+            success: !resultPreview.startsWith('Error') && !resultPreview.startsWith('Command failed'),
           });
           break;
+        }
 
         case 'step-finish':
-          // Handled by onStepFinish callback
+          emitSSE(sessionId, {
+            type: 'iteration',
+            n: stepCounter,
+            max: session.max_iterations,
+          });
           break;
 
         case 'error':
@@ -506,4 +525,21 @@ function truncate(str, maxLen) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatToolCallLabel(toolName, args) {
+  switch (toolName) {
+    case 'writeFile':
+      return `Write ${args.path}`;
+    case 'readFile':
+      return `Read ${args.path}`;
+    case 'listFiles':
+      return `List ${args.path || '.'}`;
+    case 'runShell':
+      return `Run \`${args.command}\``;
+    case 'startDevServer':
+      return `Start server: \`${args.command}\``;
+    default:
+      return `${toolName}(${JSON.stringify(args).slice(0, 60)})`;
+  }
 }

@@ -58,9 +58,18 @@ export const Messages = forwardRef<HTMLDivElement, MessagesProps>(
               const isFirst = index === 0;
               const isHidden = annotations?.includes('hidden');
               const isExecutionResult = annotations?.includes('execution_result');
+              const isToolCall =
+                typeof annotations === 'object' &&
+                !Array.isArray(annotations) &&
+                (annotations as any)?.type === 'tool_call';
 
               if (isHidden) {
                 return <Fragment key={index} />;
+              }
+
+              // Inline tool call rendering (Claude Code / Codex style)
+              if (isToolCall) {
+                return <ToolCallMessage key={index} content={content} annotations={annotations} isFirst={isFirst} />;
               }
 
               // Compact rendering for agent execution results
@@ -161,6 +170,53 @@ function ExecutionResultMessage({ content, isFirst }: { content: string; isFirst
             </div>
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+// Inline tool call message (Claude Code / Codex style)
+function ToolCallMessage({ content, annotations, isFirst }: { content: string; annotations: any; isFirst: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+  const resolved = annotations?.resolved;
+  const success = annotations?.success;
+  const result = annotations?.result;
+  const toolName = annotations?.toolName;
+
+  // Icon based on tool type
+  const icon =
+    toolName === 'writeFile'
+      ? 'i-ph:file-text'
+      : toolName === 'readFile'
+        ? 'i-ph:eye'
+        : toolName === 'runShell'
+          ? 'i-ph:terminal'
+          : toolName === 'startDevServer'
+            ? 'i-ph:play'
+            : toolName === 'listFiles'
+              ? 'i-ph:folder-open'
+              : 'i-ph:gear';
+
+  const statusIcon = !resolved
+    ? 'i-svg-spinners:ring-resize'
+    : success
+      ? 'i-ph:check-circle text-bolt-elements-icon-success'
+      : 'i-ph:x-circle text-bolt-elements-button-danger-text';
+
+  return (
+    <div className={classNames('px-4 py-1', { 'mt-1': !isFirst })}>
+      <button
+        onClick={() => result && setExpanded(!expanded)}
+        className="flex items-center gap-2 text-sm text-bolt-elements-textSecondary hover:text-bolt-elements-textPrimary transition-colors w-full text-left font-mono"
+      >
+        <span className={`${icon} flex-shrink-0`} />
+        <span className={`${statusIcon} flex-shrink-0 text-xs`} />
+        <span className="truncate">{content}</span>
+      </button>
+      {expanded && result && (
+        <pre className="mt-1 ml-7 text-xs font-mono text-bolt-elements-textSecondary bg-bolt-elements-background-depth-3 rounded p-2 max-h-40 overflow-auto whitespace-pre-wrap">
+          {result}
+        </pre>
       )}
     </div>
   );

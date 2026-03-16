@@ -46,6 +46,8 @@ export type SSEEvent =
   | { type: 'connected'; sessionId: string }
   | { type: 'text-delta'; delta: string }
   | { type: 'message-complete'; messageId: string }
+  | { type: 'tool-call'; toolName: string; args: any; label: string }
+  | { type: 'tool-result'; toolName: string; result: string; success: boolean }
   | { type: 'action-start'; action: AgentAction }
   | { type: 'action-complete'; result: AgentAction & { exitCode?: number; output?: string } }
   | { type: 'execution-feedback'; results: any[] }
@@ -145,6 +147,47 @@ export function useAgentChat(options: UseAgentChatOptions = {}) {
             setIsStreaming(false);
             break;
 
+          case 'tool-call':
+            // Show tool calls inline in chat (like Claude Code / Codex)
+            setCurrentAction((data as any).label || (data as any).toolName || null);
+            setMessages((msgs) => [
+              ...msgs,
+              {
+                id: `tool-${Date.now()}`,
+                role: 'execution_result',
+                content: (data as any).label || `${(data as any).toolName}(...)`,
+                annotations: { type: 'tool_call', toolName: (data as any).toolName, args: (data as any).args },
+              },
+            ]);
+            break;
+
+          case 'tool-result':
+            setCurrentAction(null);
+
+            // Update the last tool-call message with the result
+            setMessages((msgs) => {
+              const updated = [...msgs];
+
+              // Find the last tool_call message and append result
+              for (let i = updated.length - 1; i >= 0; i--) {
+                if (updated[i].annotations?.type === 'tool_call') {
+                  updated[i] = {
+                    ...updated[i],
+                    annotations: {
+                      ...updated[i].annotations,
+                      result: (data as any).result,
+                      success: (data as any).success,
+                      resolved: true,
+                    },
+                  };
+                  break;
+                }
+              }
+
+              return updated;
+            });
+            break;
+
           case 'action-start':
             setCurrentAction(data.action?.type === 'shell' ? data.action.content || null : null);
             setActions((prev) => [...prev, { ...data.action, status: 'running' }]);
@@ -158,16 +201,6 @@ export function useAgentChat(options: UseAgentChatOptions = {}) {
             break;
 
           case 'execution-feedback':
-            // Add execution results as a message for display
-            setMessages((msgs) => [
-              ...msgs,
-              {
-                id: `exec-${Date.now()}`,
-                role: 'execution_result',
-                content: JSON.stringify(data.results),
-                annotations: { type: 'execution_result', results: data.results },
-              },
-            ]);
             break;
 
           case 'iteration':

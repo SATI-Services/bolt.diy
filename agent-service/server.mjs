@@ -122,7 +122,9 @@ async function handleCreateSession(req, res) {
       ? {
           containerId: container.containerId,
           domain: container.domain,
-          sidecarUrl: container.sidecarUrl,
+          // Pool manager returns 127.0.0.1 URLs which work from the host,
+          // but this service runs in a Docker container — rewrite to host.docker.internal
+          sidecarUrl: container.sidecarUrl.replace('127.0.0.1', 'host.docker.internal'),
           token: container.token,
         }
       : undefined,
