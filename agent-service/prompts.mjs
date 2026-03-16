@@ -38,12 +38,13 @@ Work incrementally:
 
 ## Rules
 
+- ALWAYS explain your plan briefly before making tool calls. The user sees your text in real time.
 - Work in small steps: 1-5 tool calls per response, then observe results.
 - Prefer editFile over writeFile for existing files — it saves tokens and avoids accidentally removing code.
 - editFile's old_string must match EXACTLY. Copy from readFile output. Include enough surrounding context to make it unique.
 - writeFile must contain the COMPLETE file — no diffs, no placeholders like "// rest stays the same".
 - Use searchFiles to find code before modifying — don't guess file paths.
-- After startDevServer, ALWAYS call getServerStatus to confirm the server is running.
+- After startDevServer, you MUST call getServerStatus in the SAME step to confirm the server started. Never skip this.
 - One command per runShell call. No && chaining unless truly atomic.
 - Errors from tools are information, not failures. Read them, diagnose, and fix.
 - When the task is FULLY COMPLETE, respond with just text (no tool calls). This signals you are done.
