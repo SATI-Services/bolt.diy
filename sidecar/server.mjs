@@ -83,6 +83,68 @@ function handleDeleteFile(filePath) {
   return { type: 'ok', message: `Deleted: ${filePath}` };
 }
 
+function handleReadFile(filePath) {
+  const fullPath = resolvePath(filePath);
+  if (!fs.existsSync(fullPath)) {
+    return { type: 'error', message: `Not found: ${filePath}` };
+  }
+  const stat = fs.statSync(fullPath);
+  if (stat.isDirectory()) {
+    return { type: 'error', message: `Is a directory: ${filePath}` };
+  }
+  // Skip binary files (check first 512 bytes for null bytes)
+  const buf = Buffer.alloc(512);
+  const fd = fs.openSync(fullPath, 'r');
+  const bytesRead = fs.readSync(fd, buf, 0, 512, 0);
+  fs.closeSync(fd);
+  for (let i = 0; i < bytesRead; i++) {
+    if (buf[i] === 0) {
+      return { type: 'ok', content: null, isBinary: true };
+    }
+  }
+  const content = fs.readFileSync(fullPath, 'utf-8');
+  return { type: 'ok', content, isBinary: false };
+}
+
+function handleListFiles(dirPath, maxDepth = 10) {
+  const IGNORE = new Set([
+    'node_modules', '.git', 'vendor', 'storage', '.cache',
+    '.npm', '.composer', 'dist', 'build', '.next', 'coverage'
+  ]);
+  const files = {};
+
+  function walk(dir, depth) {
+    if (depth > maxDepth) return;
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+
+    for (const entry of entries) {
+      if (IGNORE.has(entry.name)) continue;
+      if (entry.name.startsWith('.') && entry.name !== '.env' && entry.name !== '.env.example') continue;
+
+      const fullPath = path.join(dir, entry.name);
+      const relativePath = path.relative(WORKDIR, fullPath);
+
+      if (entry.isDirectory()) {
+        files[relativePath] = { type: 'folder' };
+        walk(fullPath, depth + 1);
+      } else if (entry.isFile()) {
+        const stat = fs.statSync(fullPath);
+        // Skip files > 1MB
+        if (stat.size > 1024 * 1024) {
+          files[relativePath] = { type: 'file', size: stat.size, tooLarge: true };
+        } else {
+          files[relativePath] = { type: 'file', size: stat.size };
+        }
+      }
+    }
+  }
+
+  const resolved = resolvePath(dirPath || '.');
+  walk(resolved, 0);
+  return { type: 'ok', files };
+}
+
 function execCommand(command) {
   // Close placeholder before exec so the dev server can bind port 3000
   closePlaceholder();
@@ -354,6 +416,14 @@ const httpServer = http.createServer(async (req, res) => {
       req.on('close', () => {
         proc.kill();
       });
+    } else if (req.url === '/read' && req.method === 'POST') {
+      const result = handleReadFile(body.path);
+      res.writeHead(result.type === 'error' ? 404 : 200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
+    } else if (req.url === '/list-files' && req.method === 'POST') {
+      const result = handleListFiles(body.path || '.', body.maxDepth || 10);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
     } else if (req.url === '/batch' && req.method === 'POST') {
       if (Array.isArray(body.operations)) {
         for (const op of body.operations) {

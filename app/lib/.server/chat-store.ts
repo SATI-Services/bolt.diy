@@ -1,10 +1,8 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import { createScopedLogger } from '~/utils/logger';
 
 const logger = createScopedLogger('ChatStore');
 
-const DATA_DIR = process.env.CHAT_DATA_DIR || '/home/bolt.diy/data/chats';
+const STORE_URL = 'http://127.0.0.1:9850';
 
 export interface ChatData {
   urlId: string;
@@ -22,42 +20,36 @@ export interface ChatSummary {
   updatedAt: string;
 }
 
-function ensureDataDir() {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-}
-
-function chatPath(urlId: string): string {
-  // Sanitize to prevent path traversal
-  const safe = urlId.replace(/[^a-zA-Z0-9_-]/g, '');
-  return path.join(DATA_DIR, `${safe}.json`);
-}
-
 export async function saveChat(urlId: string, data: ChatData): Promise<void> {
-  try {
-    ensureDataDir();
+  const resp = await fetch(`${STORE_URL}/chats/${encodeURIComponent(urlId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
 
-    const filePath = chatPath(urlId);
-    fs.writeFileSync(filePath, JSON.stringify(data), 'utf-8');
-    logger.debug(`Chat saved: ${urlId}`);
-  } catch (error) {
-    logger.error('Failed to save chat:', error);
-    throw error;
+  if (!resp.ok) {
+    const err = await resp.text();
+    logger.error('Failed to save chat:', err);
+    throw new Error(`Failed to save chat: ${err}`);
   }
+
+  logger.debug(`Chat saved: ${urlId}`);
 }
 
 export async function loadChat(urlId: string): Promise<ChatData | null> {
   try {
-    const filePath = chatPath(urlId);
+    const resp = await fetch(`${STORE_URL}/chats/${encodeURIComponent(urlId)}`);
 
-    if (!fs.existsSync(filePath)) {
+    if (resp.status === 404) {
       return null;
     }
 
-    const raw = fs.readFileSync(filePath, 'utf-8');
+    if (!resp.ok) {
+      logger.error('Failed to load chat:', await resp.text());
+      return null;
+    }
 
-    return JSON.parse(raw) as ChatData;
+    return (await resp.json()) as ChatData;
   } catch (error) {
     logger.error('Failed to load chat:', error);
     return null;
@@ -66,26 +58,13 @@ export async function loadChat(urlId: string): Promise<ChatData | null> {
 
 export async function listChats(): Promise<ChatSummary[]> {
   try {
-    ensureDataDir();
+    const resp = await fetch(`${STORE_URL}/chats`);
 
-    const files = fs.readdirSync(DATA_DIR).filter((f) => f.endsWith('.json'));
-    const summaries: ChatSummary[] = [];
-
-    for (const file of files) {
-      try {
-        const raw = fs.readFileSync(path.join(DATA_DIR, file), 'utf-8');
-        const data = JSON.parse(raw) as ChatData;
-        summaries.push({
-          urlId: data.urlId,
-          description: data.description,
-          updatedAt: data.updatedAt,
-        });
-      } catch {
-        // skip malformed files
-      }
+    if (!resp.ok) {
+      return [];
     }
 
-    return summaries.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+    return (await resp.json()) as ChatSummary[];
   } catch (error) {
     logger.error('Failed to list chats:', error);
     return [];

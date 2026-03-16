@@ -45,24 +45,37 @@ export async function loader({ request }: LoaderFunctionArgs) {
     // Connect to the sidecar
     const upstream = new WebSocket(sidecarWsUrl);
 
-    upstream.addEventListener('open', () => {
-      // Relay messages from sidecar to client
-      upstream.addEventListener('message', (event) => {
-        try {
-          if (server.readyState === WebSocket.OPEN) {
-            server.send(event.data);
-          }
-        } catch {
-          // ignore
+    // Queue client messages until upstream is open
+    const pendingMessages: string[] = [];
+
+    // Relay messages from sidecar to client — register BEFORE open to avoid race
+    upstream.addEventListener('message', (event) => {
+      try {
+        if (server.readyState === WebSocket.OPEN) {
+          server.send(event.data);
         }
-      });
+      } catch {
+        // ignore
+      }
     });
 
-    // Relay messages from client to sidecar
+    upstream.addEventListener('open', () => {
+      // Flush any messages the client sent while upstream was connecting
+      for (const msg of pendingMessages) {
+        upstream.send(msg);
+      }
+
+      pendingMessages.length = 0;
+    });
+
+    // Relay messages from client to sidecar (queue if not yet open)
     server.addEventListener('message', (event) => {
       try {
         if (upstream.readyState === WebSocket.OPEN) {
           upstream.send(event.data);
+        } else {
+          // Queue until upstream opens
+          pendingMessages.push(typeof event.data === 'string' ? event.data : String(event.data));
         }
       } catch {
         // ignore
@@ -82,7 +95,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
       }
     });
 
-    upstream.addEventListener('error', () => {
+    upstream.addEventListener('error', (e) => {
+      console.error('Terminal upstream error:', e);
+
       try {
         server.close();
       } catch {

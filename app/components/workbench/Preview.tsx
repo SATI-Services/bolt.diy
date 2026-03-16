@@ -121,32 +121,56 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
     const { baseUrl } = activePreview;
     setDisplayPath('/');
 
-    // For Coolify preview URLs, probe until reachable before setting iframe src
+    // For Coolify preview URLs, probe sidecar health via server-side proxy
+    // (direct fetch with no-cors is blocked by Chrome ORB for HTML responses)
     if (isCoolifyUrl(baseUrl)) {
       setCoolifyProbing(true);
 
       let cancelled = false;
       let attempt = 0;
 
+      // Find the container state for this preview URL
+      const container = Object.values(coolifyContainersValue).find(
+        (c: any) => c.domain === baseUrl && c.status === 'running',
+      ) as any;
+
       const probe = async () => {
         while (!cancelled && attempt < 30) {
           try {
-            await fetch(baseUrl, { method: 'HEAD', mode: 'no-cors' });
+            if (container?.wsUrl && container?.sidecarToken) {
+              // Probe via server-side sidecar proxy (avoids ORB)
+              const resp = await fetch('/api/sidecar-proxy', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  sidecarUrl: container.wsUrl,
+                  token: container.sidecarToken,
+                  endpoint: '/health',
+                  method: 'GET',
+                }),
+              });
 
-            /*
-             * mode: no-cors returns opaque response (status 0) on success
-             * A network error (cert invalid, connection refused) throws
-             */
-            if (!cancelled) {
-              setCoolifyProbing(false);
-              setIframeUrl(baseUrl);
+              if (resp.ok && !cancelled) {
+                setCoolifyProbing(false);
+                setIframeUrl(baseUrl);
+
+                return;
+              }
+            } else {
+              // No container info — just load the iframe directly
+              if (!cancelled) {
+                setCoolifyProbing(false);
+                setIframeUrl(baseUrl);
+              }
+
+              return;
             }
-
-            return;
           } catch {
-            attempt++;
-            await new Promise((r) => setTimeout(r, 3000));
+            // Probe failed, retry
           }
+
+          attempt++;
+          await new Promise((r) => setTimeout(r, 3000));
         }
 
         // After max attempts, try loading anyway
@@ -1067,6 +1091,8 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
                       src={iframeUrl}
                       sandbox="allow-scripts allow-forms allow-popups allow-modals allow-storage-access-by-user-activation allow-same-origin"
                       allow="cross-origin-isolated"
+                      // @ts-expect-error -- credentialless is valid but not yet in React's types
+                      credentialless=""
                     />
                   </div>
                 </div>
@@ -1078,6 +1104,8 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
                   src={iframeUrl}
                   sandbox="allow-scripts allow-forms allow-popups allow-modals allow-storage-access-by-user-activation allow-same-origin"
                   allow="geolocation; ch-ua-full-version-list; cross-origin-isolated; screen-wake-lock; publickey-credentials-get; shared-storage-select-url; ch-ua-arch; bluetooth; compute-pressure; ch-prefers-reduced-transparency; deferred-fetch; usb; ch-save-data; publickey-credentials-create; shared-storage; deferred-fetch-minimal; run-ad-auction; ch-ua-form-factors; ch-downlink; otp-credentials; payment; ch-ua; ch-ua-model; ch-ect; autoplay; camera; private-state-token-issuance; accelerometer; ch-ua-platform-version; idle-detection; private-aggregation; interest-cohort; ch-viewport-height; local-fonts; ch-ua-platform; midi; ch-ua-full-version; xr-spatial-tracking; clipboard-read; gamepad; display-capture; keyboard-map; join-ad-interest-group; ch-width; ch-prefers-reduced-motion; browsing-topics; encrypted-media; gyroscope; serial; ch-rtt; ch-ua-mobile; window-management; unload; ch-dpr; ch-prefers-color-scheme; ch-ua-wow64; attribution-reporting; fullscreen; identity-credentials-get; private-state-token-redemption; hid; ch-ua-bitness; storage-access; sync-xhr; ch-device-memory; ch-viewport-width; picture-in-picture; magnetometer; clipboard-write; microphone"
+                  // @ts-expect-error -- credentialless is valid but not yet in React's types
+                  credentialless=""
                 />
               )}
               <ScreenshotSelector

@@ -370,19 +370,49 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
               <StickToBottom.Content className="flex flex-col gap-4 relative ">
                 <ClientOnly>
                   {() => {
-                    return chatStarted ? (
-                      <Messages
-                        className="flex flex-col w-full flex-1 max-w-chat pb-4 mx-auto z-1"
-                        messages={messages}
-                        isStreaming={isStreaming}
-                        append={append}
-                        chatMode={chatMode}
-                        setChatMode={setChatMode}
-                        provider={provider}
-                        model={model}
-                        addToolResult={addToolResult}
-                      />
-                    ) : null;
+                    if (!chatStarted) {
+                      return null;
+                    }
+
+                    const lastMsg = messages?.[messages.length - 1];
+                    const isIncomplete =
+                      !isStreaming &&
+                      lastMsg?.role === 'assistant' &&
+                      ((lastMsg.content.includes('<boltArtifact') &&
+                        !lastMsg.content.includes('</boltArtifact>')) ||
+                        (lastMsg.content.includes('<boltAction') &&
+                          !lastMsg.content.includes('</boltAction>')));
+
+                    return (
+                      <>
+                        <Messages
+                          className="flex flex-col w-full flex-1 max-w-chat pb-4 mx-auto z-1"
+                          messages={messages}
+                          isStreaming={isStreaming}
+                          append={append}
+                          chatMode={chatMode}
+                          setChatMode={setChatMode}
+                          provider={provider}
+                          model={model}
+                          addToolResult={addToolResult}
+                        />
+                        {isIncomplete && (
+                          <div className="flex justify-center pb-4">
+                            <button
+                              onClick={() =>
+                                sendMessage?.(
+                                  {} as any,
+                                  'Continue your response from exactly where you left off. Do not repeat any content already generated.',
+                                )
+                              }
+                              className="px-4 py-2 rounded-lg bg-bolt-elements-button-primary-background text-bolt-elements-button-primary-text hover:bg-bolt-elements-button-primary-backgroundHover text-sm font-medium transition-colors"
+                            >
+                              Continue generation
+                            </button>
+                          </div>
+                        )}
+                      </>
+                    );
                   }}
                 </ClientOnly>
                 <ScrollToBottom />

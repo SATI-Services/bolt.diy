@@ -7,6 +7,12 @@ export interface IChatMetadata {
   gitUrl: string;
   gitBranch?: string;
   netlifySiteId?: string;
+  coolifyContainer?: {
+    appUuid: string;
+    domain: string;
+    wsUrl: string;
+    sidecarToken: string;
+  };
 }
 
 const logger = createScopedLogger('ChatHistory');

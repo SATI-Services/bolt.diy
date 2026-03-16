@@ -1,6 +1,5 @@
 import type { WebContainer } from '@webcontainer/api';
 import { path as nodePath } from '~/utils/path';
-import { WORK_DIR } from '~/utils/constants';
 import { atom, map, type MapStore } from 'nanostores';
 import type { ActionAlert, BoltAction, DeployAlert, FileHistory, SupabaseAction, SupabaseAlert } from '~/types/actions';
 import { createScopedLogger } from '~/utils/logger';
@@ -17,7 +16,6 @@ export type BaseActionState = BoltAction & {
   abort: () => void;
   executed: boolean;
   abortSignal: AbortSignal;
-  shellOutput?: string;
 };
 
 export type FailedActionState = BoltAction &
@@ -28,7 +26,7 @@ export type FailedActionState = BoltAction &
 
 export type ActionState = BaseActionState | FailedActionState;
 
-type BaseActionUpdate = Partial<Pick<BaseActionState, 'status' | 'abort' | 'executed' | 'shellOutput'>>;
+type BaseActionUpdate = Partial<Pick<BaseActionState, 'status' | 'abort' | 'executed'>>;
 
 export type ActionStateUpdate =
   | BaseActionUpdate
@@ -75,10 +73,9 @@ export class ActionRunner {
   onSupabaseAlert?: (alert: SupabaseAlert) => void;
   onDeployAlert?: (alert: DeployAlert) => void;
   onFileWrite?: (path: string, content: string) => void;
-  onShellExec?: (command: string, onOutput?: (data: string) => void) => Promise<{ exitCode: number; output: string }>;
+  onShellExec?: (command: string) => void;
   onPreviewUrl?: (url: string) => void;
   coolifyEnabled?: boolean;
-  containerReadyPromise?: Promise<unknown>;
   buildOutput?: { path: string; exitCode: number; output: string };
 
   constructor(
@@ -106,35 +103,6 @@ export class ActionRunner {
       return;
     }
 
-    // Dedup: skip file actions for paths already seen in this artifact
-    // (don't require a.executed — streaming actions have executed=false)
-    if (data.action.type === 'file') {
-      const filePath = (data.action as any).filePath;
-      const existingForPath = Object.values(actions).find(
-        (a) => a.type === 'file' && (a as any).filePath === filePath,
-      );
-
-      if (existingForPath) {
-        logger.debug(`Skipping duplicate file action for ${filePath}`);
-        return;
-      }
-    }
-
-    // Dedup: skip shell/start commands already seen with the same content
-    if (data.action.type === 'shell' || data.action.type === 'start') {
-      const content = (data.action as any).content;
-      const existingCmd = Object.values(actions).find(
-        (a) =>
-          (a.type === 'shell' || a.type === 'start') &&
-          (a as any).content === content,
-      );
-
-      if (existingCmd) {
-        logger.debug(`Skipping duplicate ${data.action.type} action: ${content?.slice(0, 50)}`);
-        return;
-      }
-    }
-
     const abortController = new AbortController();
 
     this.actions.setKey(actionId, {
@@ -146,6 +114,10 @@ export class ActionRunner {
         this.#updateAction(actionId, { status: 'aborted' });
       },
       abortSignal: abortController.signal,
+    });
+
+    this.#currentExecutionPromise.then(() => {
+      this.#updateAction(actionId, { status: 'running' });
     });
   }
 
@@ -181,11 +153,6 @@ export class ActionRunner {
   }
 
   async #executeAction(actionId: string, isStreaming: boolean = false) {
-    // Wait for Coolify container to be ready before executing any action
-    if (this.coolifyEnabled && this.containerReadyPromise) {
-      await this.containerReadyPromise;
-    }
-
     const action = this.actions.get()[actionId];
 
     this.#updateAction(actionId, { status: 'running' });
@@ -193,7 +160,7 @@ export class ActionRunner {
     try {
       switch (action.type) {
         case 'shell': {
-          await this.#runShellAction(action, actionId);
+          await this.#runShellAction(action);
           break;
         }
         case 'file': {
@@ -292,7 +259,7 @@ export class ActionRunner {
     }
   }
 
-  async #runShellAction(action: ActionState, actionId?: string) {
+  async #runShellAction(action: ActionState) {
     if (action.type !== 'shell') {
       unreachable('Expected shell action');
     }
@@ -305,30 +272,11 @@ export class ActionRunner {
       action.content = validationResult.modifiedCommand;
     }
 
-    /*
-     * When Coolify is enabled, route commands exclusively to sidecar.
-     * WebContainer shell can hang on interactive prompts (e.g. npm create vite "Ok to proceed?").
-     */
+    // When Coolify is enabled, route commands exclusively to sidecar.
+    // WebContainer shell can hang on interactive prompts (e.g. npm create vite "Ok to proceed?").
     if (this.coolifyEnabled) {
       logger.debug(`[Coolify] Routing shell command to sidecar: ${action.content}`);
-
-      if (this.onShellExec) {
-        const result = await this.onShellExec(action.content, (data: string) => {
-          if (actionId) {
-            const current = this.actions.get()[actionId];
-
-            if (current) {
-              const existing = current.shellOutput || '';
-              this.#updateAction(actionId, { shellOutput: existing + data });
-            }
-          }
-        });
-
-        if (result.exitCode !== 0) {
-          throw new ActionCommandError(`Shell command failed (exit ${result.exitCode})`, result.output);
-        }
-      }
-
+      this.onShellExec?.(action.content);
       return;
     }
 
@@ -361,12 +309,7 @@ export class ActionRunner {
     // When Coolify is enabled, route start commands exclusively to sidecar.
     if (this.coolifyEnabled) {
       logger.debug(`[Coolify] Routing start command to sidecar: ${action.content}`);
-
-      // Start commands are long-running (dev servers) — fire and don't wait for exit
-      if (this.onShellExec) {
-        this.onShellExec(action.content);
-      }
-
+      this.onShellExec?.(action.content);
       return;
     }
 
@@ -390,20 +333,13 @@ export class ActionRunner {
     if (resp?.exitCode != 0) {
       throw new ActionCommandError('Failed To Start Application', resp?.output || 'No Output Available');
     }
+
+    return resp;
   }
 
   async #runFileAction(action: ActionState) {
     if (action.type !== 'file') {
       unreachable('Expected file action');
-    }
-
-    // In Coolify mode, write directly to sidecar only — skip WebContainer entirely
-    if (this.coolifyEnabled) {
-      const relativePath = nodePath.relative(WORK_DIR, action.filePath);
-      logger.debug(`[Coolify] File written to sidecar only: ${relativePath}`);
-      this.onFileWrite?.(relativePath, action.content);
-
-      return;
     }
 
     const webcontainer = await this.#webcontainer;
@@ -674,48 +610,6 @@ export class ActionRunner {
     warning?: string;
   }> {
     const trimmedCommand = command.trim();
-
-    // Rewrite scaffold commands that target "." or /app/ to use /tmp/ pattern
-    // This prevents "directory not empty" errors when file actions have already written to /app/
-    if (this.coolifyEnabled) {
-      // Match: composer create-project <package> . [flags...]
-      const composerDotMatch = trimmedCommand.match(
-        /^(composer\s+create-project\s+\S+)\s+\.\s*(.*?)$/,
-      );
-
-      if (composerDotMatch) {
-        const [, composerCmd, flags] = composerDotMatch;
-        const modifiedCommand = `${composerCmd} /tmp/scaffold-new ${flags} && cp -a /tmp/scaffold-new/. /app/ && rm -rf /tmp/scaffold-new`.replace(
-          /\s+/g,
-          ' ',
-        );
-
-        return {
-          shouldModify: true,
-          modifiedCommand,
-          warning: 'Rewrote scaffold command to use /tmp/ pattern (target dir may not be empty)',
-        };
-      }
-
-      // Match: composer create-project <package> /app [flags...] or /app/ or /app/.
-      const composerAppMatch = trimmedCommand.match(
-        /^(composer\s+create-project\s+\S+)\s+\/app\/?\s*(.*?)$/,
-      );
-
-      if (composerAppMatch) {
-        const [, composerCmd, flags] = composerAppMatch;
-        const modifiedCommand = `${composerCmd} /tmp/scaffold-new ${flags} && cp -a /tmp/scaffold-new/. /app/ && rm -rf /tmp/scaffold-new`.replace(
-          /\s+/g,
-          ' ',
-        );
-
-        return {
-          shouldModify: true,
-          modifiedCommand,
-          warning: 'Rewrote scaffold command to use /tmp/ pattern (target dir may not be empty)',
-        };
-      }
-    }
 
     // Handle rm commands that might fail due to missing files
     if (trimmedCommand.startsWith('rm ') && !trimmedCommand.includes(' -f')) {

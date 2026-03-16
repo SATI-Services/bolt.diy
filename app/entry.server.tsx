@@ -70,7 +70,10 @@ export default async function handleRequest(
 
   responseHeaders.set('Content-Type', 'text/html');
 
-  responseHeaders.set('Cross-Origin-Embedder-Policy', 'require-corp');
+  // Use 'credentialless' instead of 'require-corp' so cross-origin iframes
+  // (Coolify preview containers) can load without CORP headers.
+  // 'credentialless' still enables cross-origin isolation (SharedArrayBuffer).
+  responseHeaders.set('Cross-Origin-Embedder-Policy', 'credentialless');
   responseHeaders.set('Cross-Origin-Opener-Policy', 'same-origin');
 
   return new Response(body, {

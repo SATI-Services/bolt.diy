@@ -30,7 +30,13 @@ const defaultSettings: CoolifySettings = {
   sidecarImage: '10.0.0.1:5000/preview-sidecar:latest',
 };
 
-const initialSettings: CoolifySettings = storedSettings ? JSON.parse(storedSettings) : defaultSettings;
+const initialSettings: CoolifySettings = storedSettings
+  ? JSON.parse(storedSettings)
+  : {
+      ...defaultSettings,
+      // Auto-enable if we have a saved connection that was previously connected
+      enabled: defaultSettings.enabled || !!(initialConnection.connected && initialConnection.url && initialConnection.token),
+    };
 
 export const coolifyConnection = atom<CoolifyConnection>(initialConnection);
 export const coolifySettings = atom<CoolifySettings>(initialSettings);

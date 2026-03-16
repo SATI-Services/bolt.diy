@@ -19,6 +19,7 @@ export class CoolifyFileSyncService {
   #batchQueue: Array<{ type: 'write_file' | 'mkdir' | 'delete_file'; path: string; content?: string }> = [];
   #batchTimeout: ReturnType<typeof setTimeout> | null = null;
   #batchDelay: number = 50;
+  #maxRetries: number = 3;
   #pendingOps: Array<{ type: 'write' | 'exec'; path?: string; content?: string; command?: string }> = [];
 
   get connected(): boolean {
@@ -92,7 +93,6 @@ export class CoolifyFileSyncService {
 
         if (health.serverReady && health.detectedPort) {
           this.#onServerReady?.({ type: 'server_ready', port: health.detectedPort });
-
           // Stop polling once server is ready
           this.#stopHealthCheck();
         }
@@ -138,7 +138,7 @@ export class CoolifyFileSyncService {
     }, this.#batchDelay);
   }
 
-  async #flushBatch() {
+  async #flushBatch(retryCount: number = 0) {
     if (this.#batchQueue.length === 0) {
       return;
     }
@@ -166,59 +166,43 @@ export class CoolifyFileSyncService {
         await this.#sidecarFetch('/batch', 'POST', { operations });
       }
     } catch (error) {
-      logger.error('Batch flush failed:', error);
-    }
-  }
+      if (retryCount < this.#maxRetries) {
+        const delay = Math.min(500 * Math.pow(2, retryCount), 4000);
+        logger.warn(`Batch flush failed (attempt ${retryCount + 1}/${this.#maxRetries}), retrying in ${delay}ms...`);
 
-  async readFile(filePath: string): Promise<{ content: string | null; isBinary: boolean } | null> {
-    if (!this.#connected) {
-      return null;
-    }
+        // Re-queue the failed operations at the front
+        this.#batchQueue = [...operations, ...this.#batchQueue];
 
-    try {
-      const result = (await this.#sidecarFetch('/read', 'POST', { path: filePath })) as {
-        type: string;
-        content: string | null;
-        isBinary?: boolean;
-      };
-
-      if (result.type === 'error') {
-        return null;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        await this.#flushBatch(retryCount + 1);
+      } else {
+        logger.error(`Batch flush failed after ${this.#maxRetries} retries, ${operations.length} operations lost:`, error);
       }
-
-      return { content: result.content, isBinary: result.isBinary || false };
-    } catch (error) {
-      logger.error('Read file failed:', error);
-      return null;
     }
   }
 
-  async listFiles(dirPath: string = '.'): Promise<Record<string, { type: string; size?: number; tooLarge?: boolean }> | null> {
-    if (!this.#connected) {
-      return null;
-    }
-
-    try {
-      const result = (await this.#sidecarFetch('/list-files', 'POST', { path: dirPath })) as {
-        type: string;
-        files: Record<string, { type: string; size?: number; tooLarge?: boolean }>;
-      };
-      return result.files;
-    } catch (error) {
-      logger.error('List files failed:', error);
-      return null;
-    }
-  }
-
-  async exec(command: string, onOutput?: (data: string) => void): Promise<{ exitCode: number; output: string }> {
+  async exec(command: string): Promise<{ exitCode: number; output: string }> {
     if (!this.#connected) {
       this.#pendingOps.push({ type: 'exec', command });
       return { exitCode: 0, output: 'Queued for sidecar' };
     }
 
-    // Use streaming exec when an output callback is provided
-    if (onOutput) {
-      return this.#execStream(command, onOutput);
+    // Flush any pending file writes before executing commands.
+    // Cancel pending batch timer and flush immediately to ensure files are written first.
+    if (this.#batchTimeout) {
+      clearTimeout(this.#batchTimeout);
+      this.#batchTimeout = null;
+    }
+
+    if (this.#batchQueue.length > 0) {
+      const operations = [...this.#batchQueue];
+      this.#batchQueue = [];
+
+      try {
+        await this.#sidecarFetch('/batch', 'POST', { operations });
+      } catch (error) {
+        logger.warn('Pre-exec batch flush failed, continuing with exec:', error);
+      }
     }
 
     try {
@@ -230,66 +214,6 @@ export class CoolifyFileSyncService {
     } catch (error) {
       logger.error('Exec failed:', error);
       return { exitCode: -1, output: `Sidecar exec error: ${error}` };
-    }
-  }
-
-  async #execStream(command: string, onOutput: (data: string) => void): Promise<{ exitCode: number; output: string }> {
-    try {
-      const response = await fetch('/api/sidecar-proxy', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          sidecarUrl: this.#sidecarUrl,
-          token: this.#token,
-          endpoint: '/exec-stream',
-          method: 'POST',
-          body: { command },
-          stream: true,
-        }),
-      });
-
-      if (!response.ok || !response.body) {
-        throw new Error(`Stream exec failed: ${response.status}`);
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let finalResult = { exitCode: 0, output: '' };
-
-      while (true) {
-        const { done, value } = await reader.read();
-
-        if (done) {
-          break;
-        }
-
-        buffer += decoder.decode(value, { stream: true });
-
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              const event = JSON.parse(line.slice(6));
-
-              if (event.type === 'stdout' || event.type === 'stderr') {
-                onOutput(event.data);
-              } else if (event.type === 'exit') {
-                finalResult = { exitCode: event.exitCode, output: event.output };
-              }
-            } catch {
-              // ignore malformed SSE
-            }
-          }
-        }
-      }
-
-      return finalResult;
-    } catch (error) {
-      logger.error('Stream exec failed:', error);
-      return { exitCode: -1, output: `Stream exec error: ${error}` };
     }
   }
 

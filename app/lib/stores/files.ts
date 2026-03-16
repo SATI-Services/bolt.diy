@@ -21,6 +21,8 @@ import {
   clearCache,
 } from '~/lib/persistence/lockedFiles';
 import { getCurrentChatId } from '~/utils/fileLocks';
+import { coolifySettings } from '~/lib/stores/coolify';
+import { getCoolifyFileSyncService } from '~/lib/services/coolifyFileSyncService';
 
 const logger = createScopedLogger('FilesStore');
 
@@ -493,17 +495,69 @@ export class FilesStore {
   }
 
   /**
+   * Sync the file tree from a Coolify container into the files store.
+   * Called after shell commands (like scaffold commands) that create files
+   * outside of <boltAction type="file"> actions.
+   */
+  async syncFilesFromContainer(): Promise<void> {
+    const syncService = getCoolifyFileSyncService();
+
+    if (!syncService.connected) {
+      return;
+    }
+
+    const fileList = await syncService.listFiles('.');
+
+    if (!fileList) {
+      return;
+    }
+
+    for (const [relativePath, info] of Object.entries(fileList)) {
+      const fullPath = `${WORK_DIR}/${relativePath}`;
+
+      if (info.type === 'folder') {
+        if (!this.files.get()[fullPath]) {
+          this.files.setKey(fullPath, { type: 'folder' });
+        }
+      } else if (info.type === 'file') {
+        // Only add files we don't already have (don't overwrite LLM-written content)
+        if (!this.files.get()[fullPath] && !info.tooLarge) {
+          const result = await syncService.readFile(relativePath);
+
+          if (result && !result.isBinary && result.content !== null) {
+            this.#size++;
+            this.files.setKey(fullPath, { type: 'file', content: result.content, isBinary: false });
+          } else if (result?.isBinary) {
+            this.#size++;
+            this.files.setKey(fullPath, { type: 'file', content: '', isBinary: true });
+          }
+        }
+      }
+    }
+
+    logger.info(`Synced ${Object.keys(fileList).length} entries from container`);
+  }
+
+  /**
    * Directly update the files nanostore without touching WebContainer.
    * Used in Coolify mode where files go only to the sidecar.
    */
   setFileFromAction(filePath: string, content: string) {
-    // Ensure parent directory entries exist in the map
+    // Ensure parent directory entries exist in the map, but only within WORK_DIR.
+    // Creating entries for /home or /home/project causes errors when WebContainer
+    // tries to restore them (it expects relative paths, not absolute system paths).
     const parts = filePath.split('/');
 
     for (let i = 1; i < parts.length; i++) {
       const dirPath = parts.slice(0, i).join('/');
 
-      if (dirPath && !this.files.get()[dirPath]) {
+      // Skip directories above or equal to WORK_DIR (e.g. /home, /home/project)
+      // to avoid polluting the files store with system paths that break WebContainer restore
+      if (!dirPath || dirPath.length <= WORK_DIR.length) {
+        continue;
+      }
+
+      if (!this.files.get()[dirPath]) {
         this.files.setKey(dirPath, { type: 'folder' });
       }
     }
@@ -573,22 +627,28 @@ export class FilesStore {
   }
 
   async saveFile(filePath: string, content: string) {
-    const webcontainer = await this.#webcontainer;
-
     try {
-      const relativePath = path.relative(webcontainer.workdir, filePath);
-
-      if (!relativePath) {
-        throw new Error(`EINVAL: invalid file path, write '${relativePath}'`);
-      }
-
       const oldContent = this.getFile(filePath)?.content;
 
       if (!oldContent && oldContent !== '') {
         unreachable('Expected content to be defined');
       }
 
-      await webcontainer.fs.writeFile(relativePath, content);
+      // In Coolify mode, write to the sidecar instead of WebContainer
+      if (coolifySettings.get().enabled) {
+        const syncService = getCoolifyFileSyncService();
+        const relativePath = filePath.startsWith(WORK_DIR) ? filePath.slice(WORK_DIR.length + 1) : filePath;
+        syncService.writeFile(relativePath, content);
+      } else {
+        const webcontainer = await this.#webcontainer;
+        const relativePath = path.relative(webcontainer.workdir, filePath);
+
+        if (!relativePath) {
+          throw new Error(`EINVAL: invalid file path, write '${relativePath}'`);
+        }
+
+        await webcontainer.fs.writeFile(relativePath, content);
+      }
 
       if (!this.#modifiedFiles.has(filePath)) {
         this.#modifiedFiles.set(filePath, oldContent);

@@ -10,7 +10,7 @@ export const MAX_TOKENS = 128000;
  * Used as fallbacks when model doesn't specify maxCompletionTokens
  */
 export const PROVIDER_COMPLETION_LIMITS: Record<string, number> = {
-  OpenAI: 4096, // Standard GPT models (o1 models have much higher limits)
+  OpenAI: 16384, // GPT-4o supports 16k output
   Github: 4096, // GitHub Models use OpenAI-compatible limits
   Anthropic: 64000, // Conservative limit for Claude 4 models (Opus: 32k, Sonnet: 64k)
   Google: 8192, // Gemini 1.5 Pro/Flash standard limit
@@ -20,7 +20,7 @@ export const PROVIDER_COMPLETION_LIMITS: Record<string, number> = {
   HuggingFace: 4096,
   Mistral: 8192,
   Ollama: 8192,
-  OpenRouter: 8192,
+  OpenRouter: 32000, // OpenRouter proxies many models; use generous default (Claude/GPT support 16-64k output)
   Perplexity: 8192,
   Together: 8192,
   xAI: 8192,
@@ -44,7 +44,10 @@ export function isReasoningModel(modelName: string): boolean {
 }
 
 // limits the number of model responses that can be returned in a single request
-export const MAX_RESPONSE_SEGMENTS = 2;
+export const MAX_RESPONSE_SEGMENTS = 4;
+
+// limits for phased generation mode (plan + up to 7 file batches)
+export const MAX_PHASED_SEGMENTS = 8;
 
 export interface File {
   type: 'file';

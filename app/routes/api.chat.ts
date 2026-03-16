@@ -1,9 +1,8 @@
 import { type ActionFunctionArgs } from '@remix-run/cloudflare';
 import { createDataStream, generateId } from 'ai';
-import { MAX_RESPONSE_SEGMENTS, MAX_TOKENS, type FileMap } from '~/lib/.server/llm/constants';
-import { CONTINUE_PROMPT } from '~/lib/common/prompts/prompts';
+import { MAX_RESPONSE_SEGMENTS, MAX_PHASED_SEGMENTS, MAX_TOKENS, type FileMap } from '~/lib/.server/llm/constants';
+import { getContinuePrompt } from '~/lib/common/prompts/prompts';
 import { streamText, type Messages, type StreamingOptions } from '~/lib/.server/llm/stream-text';
-import SwitchableStream from '~/lib/.server/llm/switchable-stream';
 import type { IProviderSetting } from '~/types/model';
 import { createScopedLogger } from '~/utils/logger';
 import { getFilePaths, selectContext } from '~/lib/.server/llm/select-context';
@@ -83,7 +82,10 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
     parseCookies(cookieHeader || '').providers || '{}',
   );
 
-  const stream = new SwitchableStream();
+  let continuationCount = 0;
+  let phasedMode = false;
+  const generatedFiles: string[] = [];
+  const executedCommands: string[] = [];
 
   const cumulativeUsage = {
     completionTokens: 0,
@@ -245,7 +247,54 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
               cumulativeUsage.totalTokens += usage.totalTokens || 0;
             }
 
-            if (finishReason !== 'length') {
+            // Extract file paths from this response for cross-continuation tracking
+            const filePathMatches = content.matchAll(/filePath="([^"]+)"/g);
+
+            for (const match of filePathMatches) {
+              if (!generatedFiles.includes(match[1])) {
+                generatedFiles.push(match[1]);
+              }
+            }
+
+            // Extract shell commands from this response (both complete and incomplete/truncated)
+            const shellMatches = content.matchAll(/<boltAction[^>]*type="(?:shell|start)"[^>]*>([\s\S]*?)(?:<\/boltAction>|$)/g);
+
+            for (const match of shellMatches) {
+              const cmd = match[1].trim();
+
+              if (cmd && !executedCommands.includes(cmd)) {
+                executedCommands.push(cmd);
+              }
+            }
+
+            // Detect phased generation: response has a file plan but no/few file contents
+            const hasPlan = content.includes('bolt-file-plan.md') || content.includes('## Files to generate');
+            const fileActionCount = (content.match(/<boltAction[^>]*type="file"/g) || []).length;
+
+            // Count planned files from the plan's bullet list (lines starting with "- ")
+            const planMatch = content.match(/## Files to generate[\s\S]*?(?=```|<\/boltAction|$)/);
+            const planFileCount = planMatch ? (planMatch[0].match(/^[\s]*- /gm) || []).length : 0;
+
+            if (hasPlan && planFileCount > 0 && fileActionCount <= 2) {
+              // Phase 1 detected: plan emitted, few/no actual file contents
+              phasedMode = true;
+              logger.info(`Phased generation detected: ${planFileCount} files planned, ${fileActionCount} file actions so far`);
+            }
+
+            // Check if phased generation is complete
+            const allFilesGenerated = content.includes('All files generated');
+
+            if (allFilesGenerated && phasedMode) {
+              logger.info(`Phased generation complete: ${generatedFiles.length} files generated`);
+              phasedMode = false;
+            }
+
+            // Determine if we need to continue
+            const needsPhasedContinuation = phasedMode && !allFilesGenerated && finishReason !== 'length';
+            const needsLengthContinuation = finishReason === 'length';
+            const maxSegments = phasedMode ? MAX_PHASED_SEGMENTS : MAX_RESPONSE_SEGMENTS;
+
+            if (!needsPhasedContinuation && !needsLengthContinuation) {
               dataStream.writeMessageAnnotation({
                 type: 'usage',
                 value: {
@@ -261,27 +310,70 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
                 order: progressCounter++,
                 message: 'Response Generated',
               } satisfies ProgressAnnotation);
-              await new Promise((resolve) => setTimeout(resolve, 0));
 
-              // stream.close();
               return;
             }
 
-            if (stream.switches >= MAX_RESPONSE_SEGMENTS) {
-              throw Error('Cannot continue message: Maximum segments reached');
+            if (continuationCount >= maxSegments) {
+              logger.warn(`Cannot continue message: Maximum segments reached (${maxSegments})`);
+
+              return;
             }
 
-            const switchesLeft = MAX_RESPONSE_SEGMENTS - stream.switches;
+            continuationCount++;
 
-            logger.info(`Reached max token limit (${MAX_TOKENS}): Continuing message (${switchesLeft} switches left)`);
+            // Build the continuation prompt
+            let continuationPrompt: string;
+
+            if (needsPhasedContinuation) {
+              logger.info(
+                `Phased generation: requesting batch ${continuationCount} (${maxSegments - continuationCount} continuations left)`,
+              );
+              const alreadyGenerated = generatedFiles.length > 0 ? `\nAlready generated: ${generatedFiles.join(', ')}` : '';
+              continuationPrompt = `Generate the next batch of files from the plan.${alreadyGenerated}
+Emit up to 8 files in a new <boltArtifact>. Do NOT repeat any of the above files.
+Do NOT repeat scaffold commands or start actions.
+When all planned files are done, say "All files generated."`;
+            } else {
+              logger.info(
+                `Reached max token limit (${MAX_TOKENS}): Continuing message (${maxSegments - continuationCount} continuations left)`,
+              );
+              continuationPrompt = getContinuePrompt(generatedFiles, executedCommands);
+            }
+
+            // Write progress for phased mode
+            if (needsPhasedContinuation && generatedFiles.length > 0) {
+              dataStream.writeData({
+                type: 'progress',
+                label: 'response',
+                status: 'in-progress',
+                order: progressCounter++,
+                message: `Generated ${generatedFiles.length} files...`,
+              } satisfies ProgressAnnotation);
+            }
 
             const lastUserMessage = processedMessages.filter((x) => x.role == 'user').slice(-1)[0];
             const { model, provider } = extractPropertiesFromMessage(lastUserMessage);
-            processedMessages.push({ id: generateId(), role: 'assistant', content });
+
+            // Clean up truncated content: strip incomplete last action so the model
+            // sees clean XML and can continue properly
+            let cleanedContent = content;
+
+            if (finishReason === 'length') {
+              // Find the last complete </boltAction> tag
+              const lastCompleteAction = cleanedContent.lastIndexOf('</boltAction>');
+
+              if (lastCompleteAction !== -1) {
+                // Keep everything up to and including the last complete action
+                cleanedContent = cleanedContent.substring(0, lastCompleteAction + '</boltAction>'.length);
+              }
+            }
+
+            processedMessages.push({ id: generateId(), role: 'assistant', content: cleanedContent });
             processedMessages.push({
               id: generateId(),
               role: 'user',
-              content: `[Model: ${model}]\n\n[Provider: ${provider}]\n\n${CONTINUE_PROMPT}`,
+              content: `[Model: ${model}]\n\n[Provider: ${provider}]\n\n${continuationPrompt}`,
             });
 
             const result = await streamText({
@@ -307,14 +399,12 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
               for await (const part of result.fullStream) {
                 if (part.type === 'error') {
                   const error: any = part.error;
-                  logger.error(`${error}`);
+                  logger.error(`Continuation stream error: ${error}`);
 
                   return;
                 }
               }
             })();
-
-            return;
           },
         };
 
