@@ -263,11 +263,25 @@ export const ChatImpl = memo(
     // Seed agent chat with messages restored from IndexedDB on reload
     useEffect(() => {
       if (agentMode && initialMessages.length > 0 && agentChat.messages.length === 0) {
-        const restoredMessages = initialMessages.map((m) => ({
-          id: m.id,
-          role: m.role as 'user' | 'assistant' | 'system' | 'execution_result',
-          content: typeof m.content === 'string' ? m.content : '',
-        }));
+        const restoredMessages = initialMessages.map((m) => {
+          /*
+           * Restore annotations from IndexedDB. They're stored as an array
+           * (Message.annotations is JSONValue[]), so extract the first element
+           * which is the original annotation object (e.g., { type: 'tool_call', ... }).
+           */
+          const rawAnnotations = m.annotations as any[] | undefined;
+          const ann = rawAnnotations?.[0];
+          const isToolCall = ann && typeof ann === 'object' && ann.type === 'tool_call';
+
+          return {
+            id: m.id,
+            role: isToolCall
+              ? ('execution_result' as const)
+              : (m.role as 'user' | 'assistant' | 'system' | 'execution_result'),
+            content: typeof m.content === 'string' ? m.content : '',
+            annotations: ann || undefined,
+          };
+        });
         agentChat.setMessages(restoredMessages);
       }
     }, [initialMessages]);
@@ -282,19 +296,22 @@ export const ChatImpl = memo(
       });
     }, [messages, isLoading, parseMessages]);
 
-    // Agent mode: persist messages to IndexedDB so chats survive refresh and show in sidebar
+    /*
+     * Agent mode: persist messages to IndexedDB so chats survive refresh and show in sidebar.
+     * Preserve annotations so tool calls render correctly after reload.
+     */
     useEffect(() => {
       if (!agentMode || agentChat.messages.length === 0) {
         return;
       }
 
-      // Convert agent messages to Message format for persistence (strip tool_call annotations)
       const persistableMessages: Message[] = agentChat.messages.map(
         (m) =>
           ({
             id: m.id,
             role: m.role === 'execution_result' ? ('assistant' as const) : (m.role as 'user' | 'assistant'),
             content: m.content,
+            annotations: m.annotations ? [m.annotations] : undefined,
           }) as Message,
       );
 
