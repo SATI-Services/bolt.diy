@@ -83,7 +83,6 @@ interface BaseChatProps {
   addToolResult?: ({ toolCallId, result }: { toolCallId: string; result: any }) => void;
   onWebSearchResult?: (result: string) => void;
   agentMode?: boolean;
-  setAgentMode?: (enabled: boolean) => void;
   agentIteration?: { n: number; max: number };
   agentStatus?: string;
   agentCurrentAction?: string | null;

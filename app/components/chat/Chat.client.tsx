@@ -130,28 +130,20 @@ export const ChatImpl = memo(
     const mcpSettings = useMCPStore((state) => state.settings);
     const pendingMessageRef = useRef<string | null>(null);
 
-    // Agent mode state
-    const [agentMode, setAgentMode] = useState(() => {
-      return Cookies.get('agentMode') === 'true';
-    });
+    /*
+     * Agent mode is always on — the server-side agent loop handles all
+     * LLM calls and action execution. The client is purely an SSE observer.
+     */
+    const agentMode = true;
 
-    const handleAgentModeChange = useCallback((enabled: boolean) => {
-      setAgentMode(enabled);
-      Cookies.set('agentMode', String(enabled), { expires: 30 });
-    }, []);
-
-    // Agent chat hook (only active when agentMode is on)
+    // Agent chat hook
     const agentChat = useAgentChat({
-      sessionId: agentMode ? chatId.get() || undefined : undefined,
+      sessionId: chatId.get() || undefined,
       onActionStart: (action) => {
-        if (agentMode) {
-          workbenchStore.handleAgentActionStart(action);
-        }
+        workbenchStore.handleAgentActionStart(action);
       },
       onActionComplete: (result) => {
-        if (agentMode) {
-          workbenchStore.handleAgentActionComplete(result);
-        }
+        workbenchStore.handleAgentActionComplete(result);
       },
       onDone: (reason) => {
         logger.info('Agent loop done', { reason });
@@ -863,10 +855,9 @@ export const ChatImpl = memo(
         addToolResult={addToolResult}
         onWebSearchResult={handleWebSearchResult}
         agentMode={agentMode}
-        setAgentMode={handleAgentModeChange}
-        agentIteration={agentMode ? agentChat.iteration : undefined}
-        agentStatus={agentMode ? agentChat.status : undefined}
-        agentCurrentAction={agentMode ? agentChat.currentAction : undefined}
+        agentIteration={agentChat.iteration}
+        agentStatus={agentChat.status}
+        agentCurrentAction={agentChat.currentAction}
       />
     );
   },
