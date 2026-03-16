@@ -22,6 +22,7 @@ import {
   saveAction,
   updateAction,
   upsertFile,
+  deleteFileRecord,
 } from './db.mjs';
 import { getModelInstance, getMaxTokens, isReasoningModel } from './llm.mjs';
 import { getAgentSystemPrompt } from './prompts.mjs';
@@ -122,6 +123,31 @@ async function sidecarFetch(sidecarUrl, token, endpoint, body) {
   return resp.json().catch(() => null);
 }
 
+async function sidecarGet(sidecarUrl, endpoint) {
+  const resp = await fetch(`${sidecarUrl}${endpoint}`);
+
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    throw new Error(`Sidecar GET ${endpoint} failed (${resp.status}): ${text}`);
+  }
+
+  return resp.json().catch(() => null);
+}
+
+// ---------------------------------------------------------------------------
+// Glob-to-regex helper
+// ---------------------------------------------------------------------------
+
+function globToRegex(pattern) {
+  let re = pattern
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*\*/g, '\0')
+    .replace(/\*/g, '[^/]*')
+    .replace(/\0/g, '.*')
+    .replace(/\?/g, '[^/]');
+  return new RegExp(`^${re}$`);
+}
+
 // ---------------------------------------------------------------------------
 // Tool definitions factory — creates tools bound to a specific session
 // ---------------------------------------------------------------------------
@@ -137,7 +163,7 @@ function createTools(session, sessionId) {
     writeFile: tool({
       description:
         'Write a file to the project. Provide the COMPLETE file contents — no diffs or partial updates. ' +
-        'Path is relative to /app (the working directory).',
+        'Path is relative to /app (the working directory). For small changes to existing files, prefer editFile instead.',
       parameters: z.object({
         path: z.string().describe('File path relative to /app, e.g. "src/App.tsx" or "package.json"'),
         content: z.string().describe('Complete file contents'),
@@ -171,6 +197,77 @@ function createTools(session, sessionId) {
       },
     }),
 
+    editFile: tool({
+      description:
+        'Make a targeted edit to an existing file by replacing a specific string. ' +
+        'Much more efficient than writeFile for small changes. ' +
+        'old_string must match EXACTLY one location in the file. Use readFile first to get exact content.',
+      parameters: z.object({
+        path: z.string().describe('File path relative to /app'),
+        old_string: z.string().describe('Exact text to find in the file (must be unique)'),
+        new_string: z.string().describe('Replacement text (empty string to delete the match)'),
+      }),
+      execute: async ({ path, old_string, new_string }) => {
+        const actionId = crypto.randomUUID();
+
+        emitSSE(sessionId, {
+          type: 'action-start',
+          action: { id: actionId, type: 'file', filePath: path },
+        });
+
+        try {
+          // Read current contents
+          const result = await sidecarFetch(sidecarUrl, sidecarToken, '/read', { path });
+          const content = result?.content ?? result?.data ?? '';
+
+          if (typeof content !== 'string') {
+            return `Error editing ${path}: could not read file contents`;
+          }
+
+          // Validate old_string exists
+          const idx = content.indexOf(old_string);
+
+          if (idx === -1) {
+            emitSSE(sessionId, {
+              type: 'action-complete',
+              result: { id: actionId, type: 'file', status: 'failed', filePath: path, output: 'old_string not found' },
+            });
+            return `Error editing ${path}: old_string not found in file. Use readFile to see current contents.`;
+          }
+
+          // Validate uniqueness
+          const secondIdx = content.indexOf(old_string, idx + 1);
+
+          if (secondIdx !== -1) {
+            emitSSE(sessionId, {
+              type: 'action-complete',
+              result: { id: actionId, type: 'file', status: 'failed', filePath: path, output: 'old_string not unique' },
+            });
+            return `Error editing ${path}: old_string appears multiple times. Include more surrounding context to make it unique.`;
+          }
+
+          // Apply replacement
+          const newContent = content.slice(0, idx) + new_string + content.slice(idx + old_string.length);
+          await sidecarFetch(sidecarUrl, sidecarToken, '/write', { path, content: newContent });
+          await upsertFile(sessionId, path, newContent);
+
+          emitSSE(sessionId, {
+            type: 'action-complete',
+            result: { id: actionId, type: 'file', status: 'complete', filePath: path, content: newContent },
+          });
+
+          return `File edited successfully: ${path}`;
+        } catch (err) {
+          emitSSE(sessionId, {
+            type: 'action-complete',
+            result: { id: actionId, type: 'file', status: 'failed', filePath: path, output: err.message },
+          });
+
+          return `Error editing ${path}: ${err.message}`;
+        }
+      },
+    }),
+
     readFile: tool({
       description: 'Read the current contents of a file. Use this BEFORE modifying existing files.',
       parameters: z.object({
@@ -192,6 +289,70 @@ function createTools(session, sessionId) {
       },
     }),
 
+    searchFiles: tool({
+      description:
+        'Search for a pattern across project files using grep. Returns matching lines with file paths and line numbers. ' +
+        'Use this to find code before modifying it — do not guess file paths.',
+      parameters: z.object({
+        pattern: z.string().describe('Regex pattern to search for, e.g. "useState" or "import.*Router"'),
+        path: z.string().describe('Directory to search in, relative to /app').default('.'),
+      }),
+      execute: async ({ pattern, path }) => {
+        try {
+          const result = await sidecarFetch(sidecarUrl, sidecarToken, '/search', { pattern, path });
+          const matches = result?.matches || result?.results || [];
+
+          if (!matches.length) {
+            return `No matches found for "${pattern}"${path !== '.' ? ` in ${path}` : ''}`;
+          }
+
+          const lines = matches.map((m) => `${m.file}:${m.line}: ${m.content}`);
+          const output = lines.join('\n');
+
+          return truncate(output, 15000);
+        } catch (err) {
+          return `Error searching for "${pattern}": ${err.message}`;
+        }
+      },
+    }),
+
+    searchGlob: tool({
+      description:
+        'Find files by name pattern (glob). Use to discover project structure, e.g. "*.tsx", "**/*.test.ts", "tsconfig*".',
+      parameters: z.object({
+        pattern: z.string().describe('Glob pattern, e.g. "*.tsx", "**/*.test.ts", "src/**/*.css"'),
+        path: z.string().describe('Directory to search in, relative to /app').default('.'),
+      }),
+      execute: async ({ pattern, path }) => {
+        try {
+          const result = await sidecarFetch(sidecarUrl, sidecarToken, '/list-files', {
+            path,
+            maxDepth: 15,
+          });
+
+          const files = result?.files || {};
+          const filePaths = Object.keys(files);
+          const regex = globToRegex(pattern);
+          const matches = filePaths.filter((fp) => {
+            // Match against full path and also just the filename
+            const name = fp.split('/').pop();
+            return regex.test(fp) || regex.test(name);
+          });
+
+          if (!matches.length) {
+            return `No files matching "${pattern}"${path !== '.' ? ` in ${path}` : ''}`;
+          }
+
+          const output = matches.slice(0, 100).join('\n');
+          const suffix = matches.length > 100 ? `\n... and ${matches.length - 100} more` : '';
+
+          return output + suffix;
+        } catch (err) {
+          return `Error searching for files matching "${pattern}": ${err.message}`;
+        }
+      },
+    }),
+
     listFiles: tool({
       description: 'List files and directories at a given path.',
       parameters: z.object({
@@ -199,24 +360,58 @@ function createTools(session, sessionId) {
       }),
       execute: async ({ path }) => {
         try {
-          // Try /list endpoint; fall back to ls via /exec
-          try {
-            const result = await sidecarFetch(sidecarUrl, sidecarToken, '/list', { path });
-
-            if (result?.entries) {
-              return result.entries.map((e) => `${e.type === 'dir' ? 'd' : 'f'} ${e.name}`).join('\n');
-            }
-          } catch {
-            /* endpoint may not exist */
-          }
-
-          const result = await sidecarFetch(sidecarUrl, sidecarToken, '/exec', {
-            command: `ls -la ${path}`,
+          const result = await sidecarFetch(sidecarUrl, sidecarToken, '/list-files', {
+            path,
+            maxDepth: 3,
           });
 
-          return truncate(result?.output || 'Empty directory', 10000);
+          if (result?.files) {
+            const entries = Object.entries(result.files).map(
+              ([filePath, info]) => `${info.type === 'directory' ? 'd' : 'f'} ${filePath}`,
+            );
+
+            if (entries.length) {
+              return truncate(entries.join('\n'), 10000);
+            }
+          }
+
+          return 'Empty directory';
         } catch (err) {
           return `Error listing ${path}: ${err.message}`;
+        }
+      },
+    }),
+
+    deleteFile: tool({
+      description: 'Delete a file from the project.',
+      parameters: z.object({
+        path: z.string().describe('File path relative to /app'),
+      }),
+      execute: async ({ path }) => {
+        const actionId = crypto.randomUUID();
+
+        emitSSE(sessionId, {
+          type: 'action-start',
+          action: { id: actionId, type: 'file', filePath: path },
+        });
+
+        try {
+          await sidecarFetch(sidecarUrl, sidecarToken, '/delete', { path });
+          await deleteFileRecord(sessionId, path);
+
+          emitSSE(sessionId, {
+            type: 'action-complete',
+            result: { id: actionId, type: 'file', status: 'complete', filePath: path },
+          });
+
+          return `File deleted: ${path}`;
+        } catch (err) {
+          emitSSE(sessionId, {
+            type: 'action-complete',
+            result: { id: actionId, type: 'file', status: 'failed', filePath: path, output: err.message },
+          });
+
+          return `Error deleting ${path}: ${err.message}`;
         }
       },
     }),
@@ -264,7 +459,8 @@ function createTools(session, sessionId) {
     startDevServer: tool({
       description:
         'Start a long-running dev server (npm run dev, etc). Fire-and-forget — does not wait for exit. ' +
-        'Use ONCE per project setup. Dev servers must bind to 0.0.0.0.',
+        'Use ONCE per project setup. Dev servers must bind to 0.0.0.0. ' +
+        'After calling this, use getServerStatus to confirm the server is running.',
       parameters: z.object({
         command: z.string().describe('The dev server command, e.g. "npm run dev"'),
       }),
@@ -287,7 +483,79 @@ function createTools(session, sessionId) {
           result: { id: actionId, type: 'start', status: 'running', command, output: 'Dev server started' },
         });
 
-        return 'Dev server started. It is now running in the background.';
+        return 'Dev server started. It is now running in the background. Call getServerStatus to verify it is ready.';
+      },
+    }),
+
+    getServerStatus: tool({
+      description:
+        'Check whether the dev server is running and on which port. ' +
+        'Call this after startDevServer to confirm the server is ready.',
+      parameters: z.object({}),
+      execute: async () => {
+        try {
+          const result = await sidecarGet(sidecarUrl, '/health');
+
+          if (result?.serverReady) {
+            const port = result.detectedPort || 'unknown';
+            return `Server is running on port ${port}`;
+          }
+
+          return 'Server is not ready yet. It may still be starting up — wait a moment and check again.';
+        } catch (err) {
+          return `Could not reach sidecar health endpoint: ${err.message}`;
+        }
+      },
+    }),
+
+    batchWrite: tool({
+      description:
+        'Write multiple files in a single operation. Use for scaffolding — when you need to create several files at once.',
+      parameters: z.object({
+        files: z.array(
+          z.object({
+            path: z.string().describe('File path relative to /app'),
+            content: z.string().describe('Complete file contents'),
+          }),
+        ).describe('Array of files to write'),
+      }),
+      execute: async ({ files }) => {
+        const actionId = crypto.randomUUID();
+
+        emitSSE(sessionId, {
+          type: 'action-start',
+          action: { id: actionId, type: 'file', filePath: `${files.length} files` },
+        });
+
+        try {
+          const operations = files.map((f) => ({
+            type: 'write_file',
+            path: f.path,
+            content: f.content,
+          }));
+          await sidecarFetch(sidecarUrl, sidecarToken, '/batch', { operations });
+
+          // Update DB for each file
+          for (const f of files) {
+            await upsertFile(sessionId, f.path, f.content);
+          }
+
+          const paths = files.map((f) => f.path).join(', ');
+
+          emitSSE(sessionId, {
+            type: 'action-complete',
+            result: { id: actionId, type: 'file', status: 'complete', filePath: paths },
+          });
+
+          return `Successfully wrote ${files.length} files: ${paths}`;
+        } catch (err) {
+          emitSSE(sessionId, {
+            type: 'action-complete',
+            result: { id: actionId, type: 'file', status: 'failed', output: err.message },
+          });
+
+          return `Error in batch write: ${err.message}`;
+        }
       },
     }),
   };
@@ -384,8 +652,13 @@ export async function runAgentLoop(sessionId) {
             const tc = toolCalls[i];
             const tr = toolResults?.[i];
 
+            const fileTools = ['writeFile', 'editFile', 'readFile', 'deleteFile', 'batchWrite'];
+            const actionType = fileTools.includes(tc.toolName) ? 'file'
+              : tc.toolName === 'startDevServer' ? 'start'
+              : 'shell';
+
             await saveAction(sessionId, null, {
-              type: tc.toolName === 'writeFile' ? 'file' : tc.toolName === 'startDevServer' ? 'start' : 'shell',
+              type: actionType,
               content: tc.toolName === 'runShell' || tc.toolName === 'startDevServer'
                 ? tc.args.command
                 : JSON.stringify(tc.args),
@@ -426,12 +699,21 @@ export async function runAgentLoop(sessionId) {
           log('debug', 'Tool call', { sessionId, tool: chunk.toolName, label: toolLabel });
 
           // Emit a rich event so the client can render tool calls inline in the chat
+          // Redact large content fields from SSE to avoid bloating the stream
+          let sseArgs = chunk.args;
+
+          if (chunk.toolName === 'writeFile') {
+            sseArgs = { path: chunk.args.path, contentLength: chunk.args.content?.length };
+          } else if (chunk.toolName === 'editFile') {
+            sseArgs = { path: chunk.args.path, oldLength: chunk.args.old_string?.length, newLength: chunk.args.new_string?.length };
+          } else if (chunk.toolName === 'batchWrite') {
+            sseArgs = { fileCount: chunk.args.files?.length, paths: chunk.args.files?.map((f) => f.path) };
+          }
+
           emitSSE(sessionId, {
             type: 'tool-call',
             toolName: chunk.toolName,
-            args: chunk.toolName === 'writeFile'
-              ? { path: chunk.args.path, contentLength: chunk.args.content?.length }
-              : chunk.args,
+            args: sseArgs,
             label: toolLabel,
           });
           break;
@@ -531,14 +813,26 @@ function formatToolCallLabel(toolName, args) {
   switch (toolName) {
     case 'writeFile':
       return `Write ${args.path}`;
+    case 'editFile':
+      return `Edit ${args.path}`;
     case 'readFile':
       return `Read ${args.path}`;
+    case 'searchFiles':
+      return `Search \`${args.pattern}\`${args.path && args.path !== '.' ? ` in ${args.path}` : ''}`;
+    case 'searchGlob':
+      return `Find \`${args.pattern}\``;
     case 'listFiles':
       return `List ${args.path || '.'}`;
+    case 'deleteFile':
+      return `Delete ${args.path}`;
     case 'runShell':
       return `Run \`${args.command}\``;
     case 'startDevServer':
       return `Start server: \`${args.command}\``;
+    case 'getServerStatus':
+      return 'Check server status';
+    case 'batchWrite':
+      return `Write ${args.files?.length || 0} files`;
     default:
       return `${toolName}(${JSON.stringify(args).slice(0, 60)})`;
   }

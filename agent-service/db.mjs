@@ -197,6 +197,13 @@ export async function getFiles(sessionId) {
   return rows;
 }
 
+export async function deleteFileRecord(sessionId, path) {
+  await pool.query(
+    'DELETE FROM files WHERE session_id = $1 AND path = $2',
+    [sessionId, path],
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Full session state (for reconnection)
 // ---------------------------------------------------------------------------
