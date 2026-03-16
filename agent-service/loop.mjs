@@ -476,6 +476,14 @@ function createTools(session, sessionId) {
         });
 
         try {
+          /*
+           * Kill any existing dev server before starting a new one.
+           * This handles restarts (e.g., after vite build, config changes).
+           */
+          await sidecarFetch(sidecarUrl, sidecarToken, '/exec', {
+            command: "pkill -f 'artisan serve|node.*vite|python.*app.py|npm.*dev' 2>/dev/null; sleep 0.5; true",
+          }).catch(() => {});
+
           // Use /exec-detached so the HTTP request returns immediately
           // instead of hanging until the dev server exits (which is never)
           const result = await sidecarFetch(sidecarUrl, sidecarToken, '/exec-detached', { command });

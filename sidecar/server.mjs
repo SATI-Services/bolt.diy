@@ -31,13 +31,22 @@ const proxyServer = http.createServer((req, res) => {
     return;
   }
 
-  // Proxy the request to the target port
+  // Proxy the request to the target port.
+  // Inject X-Forwarded-* headers so backend frameworks (Laravel, Django, etc.)
+  // know the original request came over HTTPS via a reverse proxy.
+  const fwdHeaders = {
+    ...req.headers,
+    'x-forwarded-proto': req.headers['x-forwarded-proto'] || 'https',
+    'x-forwarded-host': req.headers['x-forwarded-host'] || req.headers.host,
+    'x-forwarded-for': req.headers['x-forwarded-for'] || req.socket.remoteAddress,
+  };
+
   const options = {
     hostname: '127.0.0.1',
     port: targetPort,
     path: req.url,
     method: req.method,
-    headers: req.headers,
+    headers: fwdHeaders,
   };
 
   const proxyReq = http.request(options, (proxyRes) => {
