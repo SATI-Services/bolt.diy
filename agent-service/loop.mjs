@@ -460,9 +460,12 @@ function createTools(session, sessionId) {
       description:
         'Start a long-running dev server (npm run dev, etc). Fire-and-forget — does not wait for exit. ' +
         'Use ONCE per project setup. Dev servers must bind to 0.0.0.0. ' +
-        'After calling this, use getServerStatus to confirm the server is running.',
+        'IMPORTANT: Do NOT use port 3000 — it is reserved by the system proxy. ' +
+        'Use the framework default port (e.g. 8000 for Laravel/Django, 5173 for Vite, 4321 for Astro, 8080 for Go). ' +
+        'The system will auto-detect the port and proxy it. ' +
+        'After calling this, you MUST use getServerStatus to confirm the server is running.',
       parameters: z.object({
-        command: z.string().describe('The dev server command, e.g. "npm run dev"'),
+        command: z.string().describe('The dev server command, e.g. "npm run dev" or "php artisan serve --host=0.0.0.0"'),
       }),
       execute: async ({ command }) => {
         const actionId = crypto.randomUUID();

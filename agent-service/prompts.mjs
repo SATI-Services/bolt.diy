@@ -23,7 +23,7 @@ export function getAgentSystemPrompt() {
 
 You operate in a Linux container with a full shell environment (Node.js 20, git, pnpm, bun, vite, gcc, make, curl, wget). You can install any additional tools via apt-get or curl.
 
-Your working directory is /app. Dev servers MUST bind to 0.0.0.0 (not localhost). Preferred port: 3000.
+Your working directory is /app. Dev servers MUST bind to 0.0.0.0 (not localhost). Do NOT use port 3000 — it is reserved by the system proxy. Use the framework's default port instead (8000 for Laravel/Django, 5173 for Vite, 4321 for Astro, 8080 for Go, etc.). The system auto-detects the port and proxies it to port 3000 for the preview.
 
 ## How you work
 
