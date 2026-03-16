@@ -1,0 +1,12 @@
+{
+  "name": "bolt-pool-manager",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs"
+  },
+  "dependencies": {
+    "dockerode": "^4.0.4"
+  }
+}
