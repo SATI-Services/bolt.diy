@@ -32,14 +32,42 @@ function getCompletionTokenLimit(modelDetails: any): number {
     return modelDetails.maxCompletionTokens;
   }
 
-  // 2. Use provider-specific default
+  // 2. Infer from model name for known high-output models (especially via OpenRouter)
+  const modelName = (modelDetails.name || '').toLowerCase();
+
+  if (modelName.includes('claude')) {
+    // Claude Opus: 32k, Sonnet: 64k, Haiku: 8k
+    if (modelName.includes('opus')) {
+      return 32000;
+    }
+
+    if (modelName.includes('sonnet')) {
+      return 64000;
+    }
+
+    if (modelName.includes('haiku')) {
+      return 8192;
+    }
+
+    return 32000; // Conservative default for unknown Claude models
+  }
+
+  if (modelName.includes('gpt-4o') || modelName.includes('gpt-5')) {
+    return 16384;
+  }
+
+  if (modelName.includes('gemini-2') || modelName.includes('gemini-1.5-pro')) {
+    return 8192;
+  }
+
+  // 3. Use provider-specific default
   const providerDefault = PROVIDER_COMPLETION_LIMITS[modelDetails.provider];
 
   if (providerDefault) {
     return providerDefault;
   }
 
-  // 3. Final fallback to MAX_TOKENS, but cap at reasonable limit for safety
+  // 4. Final fallback to MAX_TOKENS, but cap at reasonable limit for safety
   return Math.min(MAX_TOKENS, 16384);
 }
 
@@ -65,7 +93,6 @@ export async function streamText(props: {
   messageSliceId?: number;
   chatMode?: 'discuss' | 'build';
   designScheme?: DesignScheme;
-  coolifyEnabled?: boolean;
 }) {
   const {
     messages,
@@ -80,7 +107,6 @@ export async function streamText(props: {
     summary,
     chatMode,
     designScheme,
-    coolifyEnabled,
   } = props;
   let currentModel = DEFAULT_MODEL;
   let currentProvider = DEFAULT_PROVIDER.name;
@@ -162,7 +188,6 @@ export async function streamText(props: {
         hasSelectedProject: options?.supabaseConnection?.hasSelectedProject || false,
         credentials: options?.supabaseConnection?.credentials || undefined,
       },
-      coolifyEnabled,
     }) ?? getSystemPrompt();
 
   if (chatMode === 'build' && contextFiles && contextOptimization) {

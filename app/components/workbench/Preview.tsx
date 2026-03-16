@@ -99,7 +99,7 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
 
   // Determine if Coolify is provisioning a container
   const isCoolifyProvisioning =
-    coolifySettingsValue.enabled &&
+    coolifySettingsValue.autoProvision &&
     coolifySettingsValue.autoProvision &&
     !activePreview &&
     Object.values(coolifyContainersValue).some((c: any) => c.status === 'provisioning' || c.status === 'running');
@@ -121,32 +121,58 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
     const { baseUrl } = activePreview;
     setDisplayPath('/');
 
-    // For Coolify preview URLs, probe until reachable before setting iframe src
+    /*
+     * For Coolify preview URLs, probe sidecar health via server-side proxy
+     * (direct fetch with no-cors is blocked by Chrome ORB for HTML responses)
+     */
     if (isCoolifyUrl(baseUrl)) {
       setCoolifyProbing(true);
 
       let cancelled = false;
       let attempt = 0;
 
+      // Find the container state for this preview URL
+      const container = Object.values(coolifyContainersValue).find(
+        (c: any) => c.domain === baseUrl && c.status === 'running',
+      ) as any;
+
       const probe = async () => {
         while (!cancelled && attempt < 30) {
           try {
-            await fetch(baseUrl, { method: 'HEAD', mode: 'no-cors' });
+            if (container?.wsUrl && container?.sidecarToken) {
+              // Probe via server-side sidecar proxy (avoids ORB)
+              const resp = await fetch('/api/sidecar-proxy', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  sidecarUrl: container.wsUrl,
+                  token: container.sidecarToken,
+                  endpoint: '/health',
+                  method: 'GET',
+                }),
+              });
 
-            /*
-             * mode: no-cors returns opaque response (status 0) on success
-             * A network error (cert invalid, connection refused) throws
-             */
-            if (!cancelled) {
-              setCoolifyProbing(false);
-              setIframeUrl(baseUrl);
+              if (resp.ok && !cancelled) {
+                setCoolifyProbing(false);
+                setIframeUrl(baseUrl);
+
+                return;
+              }
+            } else {
+              // No container info — just load the iframe directly
+              if (!cancelled) {
+                setCoolifyProbing(false);
+                setIframeUrl(baseUrl);
+              }
+
+              return;
             }
-
-            return;
           } catch {
-            attempt++;
-            await new Promise((r) => setTimeout(r, 3000));
+            // Probe failed, retry
           }
+
+          attempt++;
+          await new Promise((r) => setTimeout(r, 3000));
         }
 
         // After max attempts, try loading anyway
@@ -442,67 +468,63 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
 
   const openInNewWindow = (size: WindowSize) => {
     if (activePreview?.baseUrl) {
-      const match = activePreview.baseUrl.match(/^https?:\/\/([^.]+)\.local-credentialless\.webcontainer-api\.io/);
+      const previewUrl = activePreview.baseUrl;
 
-      if (match) {
-        const previewId = match[1];
-        const previewUrl = `/webcontainer/preview/${previewId}`;
+      // Adjust dimensions for landscape mode if applicable
+      let width = size.width;
+      let height = size.height;
 
-        // Adjust dimensions for landscape mode if applicable
-        let width = size.width;
-        let height = size.height;
+      if (isLandscape && (size.frameType === 'mobile' || size.frameType === 'tablet')) {
+        // Swap width and height for landscape mode
+        width = size.height;
+        height = size.width;
+      }
 
-        if (isLandscape && (size.frameType === 'mobile' || size.frameType === 'tablet')) {
-          // Swap width and height for landscape mode
-          width = size.height;
-          height = size.width;
+      // Create a window with device frame if enabled
+      if (showDeviceFrame && size.hasFrame) {
+        // Calculate frame dimensions
+        const frameWidth = size.frameType === 'mobile' ? (isLandscape ? 120 : 40) : 60; // Width padding on each side
+        const frameHeight = size.frameType === 'mobile' ? (isLandscape ? 80 : 80) : isLandscape ? 60 : 100; // Height padding on top and bottom
+
+        // Create a window with the correct dimensions first
+        const newWindow = window.open(
+          '',
+          '_blank',
+          `width=${width + frameWidth},height=${height + frameHeight + 40},menubar=no,toolbar=no,location=no,status=no`,
+        );
+
+        if (!newWindow) {
+          console.error('Failed to open new window');
+          return;
         }
 
-        // Create a window with device frame if enabled
-        if (showDeviceFrame && size.hasFrame) {
-          // Calculate frame dimensions
-          const frameWidth = size.frameType === 'mobile' ? (isLandscape ? 120 : 40) : 60; // Width padding on each side
-          const frameHeight = size.frameType === 'mobile' ? (isLandscape ? 80 : 80) : isLandscape ? 60 : 100; // Height padding on top and bottom
+        // Create the HTML content for the frame
+        const frameColor = getFrameColor();
+        const frameRadius = size.frameType === 'mobile' ? '36px' : '20px';
+        const framePadding =
+          size.frameType === 'mobile'
+            ? isLandscape
+              ? '40px 60px'
+              : '40px 20px'
+            : isLandscape
+              ? '30px 50px'
+              : '50px 30px';
 
-          // Create a window with the correct dimensions first
-          const newWindow = window.open(
-            '',
-            '_blank',
-            `width=${width + frameWidth},height=${height + frameHeight + 40},menubar=no,toolbar=no,location=no,status=no`,
-          );
+        // Position notch and home button based on orientation
+        const notchTop = isLandscape ? '50%' : '20px';
+        const notchLeft = isLandscape ? '30px' : '50%';
+        const notchTransform = isLandscape ? 'translateY(-50%)' : 'translateX(-50%)';
+        const notchWidth = isLandscape ? '8px' : size.frameType === 'mobile' ? '60px' : '80px';
+        const notchHeight = isLandscape ? (size.frameType === 'mobile' ? '60px' : '80px') : '8px';
 
-          if (!newWindow) {
-            console.error('Failed to open new window');
-            return;
-          }
+        const homeBottom = isLandscape ? '50%' : '15px';
+        const homeRight = isLandscape ? '30px' : '50%';
+        const homeTransform = isLandscape ? 'translateY(50%)' : 'translateX(50%)';
+        const homeWidth = isLandscape ? '4px' : '40px';
+        const homeHeight = isLandscape ? '40px' : '4px';
 
-          // Create the HTML content for the frame
-          const frameColor = getFrameColor();
-          const frameRadius = size.frameType === 'mobile' ? '36px' : '20px';
-          const framePadding =
-            size.frameType === 'mobile'
-              ? isLandscape
-                ? '40px 60px'
-                : '40px 20px'
-              : isLandscape
-                ? '30px 50px'
-                : '50px 30px';
-
-          // Position notch and home button based on orientation
-          const notchTop = isLandscape ? '50%' : '20px';
-          const notchLeft = isLandscape ? '30px' : '50%';
-          const notchTransform = isLandscape ? 'translateY(-50%)' : 'translateX(-50%)';
-          const notchWidth = isLandscape ? '8px' : size.frameType === 'mobile' ? '60px' : '80px';
-          const notchHeight = isLandscape ? (size.frameType === 'mobile' ? '60px' : '80px') : '8px';
-
-          const homeBottom = isLandscape ? '50%' : '15px';
-          const homeRight = isLandscape ? '30px' : '50%';
-          const homeTransform = isLandscape ? 'translateY(50%)' : 'translateX(50%)';
-          const homeWidth = isLandscape ? '4px' : '40px';
-          const homeHeight = isLandscape ? '40px' : '4px';
-
-          // Create HTML content for the wrapper page
-          const htmlContent = `
+        // Create HTML content for the wrapper page
+        const htmlContent = `
             <!DOCTYPE html>
             <html>
             <head>
@@ -592,24 +614,21 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
             </html>
           `;
 
-          // Write the HTML content to the new window
-          newWindow.document.open();
-          newWindow.document.write(htmlContent);
-          newWindow.document.close();
-        } else {
-          // Standard window without frame
-          const newWindow = window.open(
-            previewUrl,
-            '_blank',
-            `width=${width},height=${height},menubar=no,toolbar=no,location=no,status=no`,
-          );
-
-          if (newWindow) {
-            newWindow.focus();
-          }
-        }
+        // Write the HTML content to the new window
+        newWindow.document.open();
+        newWindow.document.write(htmlContent);
+        newWindow.document.close();
       } else {
-        console.warn('[Preview] Invalid WebContainer URL:', activePreview.baseUrl);
+        // Standard window without frame
+        const newWindow = window.open(
+          previewUrl,
+          '_blank',
+          `width=${width},height=${height},menubar=no,toolbar=no,location=no,status=no`,
+        );
+
+        if (newWindow) {
+          newWindow.focus();
+        }
       }
     }
   };
@@ -852,22 +871,10 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
                             return;
                           }
 
-                          const match = activePreview.baseUrl.match(
-                            /^https?:\/\/([^.]+)\.local-credentialless\.webcontainer-api\.io/,
-                          );
-
-                          if (!match) {
-                            console.warn('[Preview] Invalid WebContainer URL:', activePreview.baseUrl);
-                            return;
-                          }
-
-                          const previewId = match[1];
-                          const previewUrl = `/webcontainer/preview/${previewId}`;
-
-                          // Open in a new window with simple parameters
+                          // Open preview in a new window
                           window.open(
-                            previewUrl,
-                            `preview-${previewId}`,
+                            activePreview.baseUrl,
+                            '_blank',
                             'width=1280,height=720,menubar=no,toolbar=no,location=no,status=no,resizable=yes',
                           );
                         }}

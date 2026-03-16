@@ -35,7 +35,7 @@ export const Artifact = memo(({ artifactId }: ArtifactProps) => {
   const artifacts = useStore(workbenchStore.artifacts);
   const artifact = artifacts[artifactId];
   const coolifyProvisionStatus = useStore(workbenchStore.coolifyProvisionStatus);
-  const coolifyEnabled = useStore(coolifySettings).enabled;
+  const coolifyEnabled = useStore(coolifySettings).autoProvision;
 
   const actions = useStore(
     computed(artifact.runner.actions, (actions) => {

@@ -39,6 +39,15 @@ export function Chat() {
   const title = useStore(description);
   useEffect(() => {
     workbenchStore.setReloadedMessages(initialMessages.map((m) => m.id));
+
+    // Auto-reconnect Coolify container on page reload when there are existing messages
+    if (initialMessages.length > 0 && coolifySettings.get().autoProvision) {
+      const id = chatId.get();
+
+      if (id) {
+        workbenchStore.startCoolifyProvisioning(id);
+      }
+    }
   }, [initialMessages]);
 
   return (
@@ -118,6 +127,7 @@ export const ChatImpl = memo(
     const [chatMode, setChatMode] = useState<'discuss' | 'build'>('build');
     const [selectedElement, setSelectedElement] = useState<ElementInfo | null>(null);
     const mcpSettings = useMCPStore((state) => state.settings);
+    const pendingMessageRef = useRef<string | null>(null);
 
     const {
       messages,
@@ -150,7 +160,6 @@ export const ChatImpl = memo(
             anonKey: supabaseConn?.credentials?.anonKey,
           },
         },
-        coolifyEnabled: coolifySettingsState.enabled,
         maxLLMSteps: mcpSettings.maxLLMSteps,
       },
       sendExtraMessageFields: true,
@@ -212,6 +221,30 @@ export const ChatImpl = memo(
         storeMessageHistory,
       });
     }, [messages, isLoading, parseMessages]);
+
+    // Warn before navigating away during generation
+    useEffect(() => {
+      if (!isLoading) {
+        return undefined;
+      }
+
+      const handler = (e: BeforeUnloadEvent) => {
+        e.preventDefault();
+        e.returnValue = '';
+      };
+      window.addEventListener('beforeunload', handler);
+
+      return () => window.removeEventListener('beforeunload', handler);
+    }, [isLoading]);
+
+    // Re-key Coolify container when the real chatId is assigned after first message
+    const currentChatId = useStore(chatId);
+
+    useEffect(() => {
+      if (currentChatId && coolifySettingsState.autoProvision) {
+        workbenchStore.rekeyProvisionedContainer(currentChatId);
+      }
+    }, [currentChatId, coolifySettingsState.autoProvision]);
 
     const scrollTextArea = () => {
       const textarea = textareaRef.current;
@@ -321,6 +354,21 @@ export const ChatImpl = memo(
       }
     }, [input, textareaRef]);
 
+    const sendMessageRef = useRef<((event: React.UIEvent, messageInput?: string) => void) | null>(null);
+
+    // Process queued messages when current generation completes
+    useEffect(() => {
+      if (!isLoading && pendingMessageRef.current && sendMessageRef.current) {
+        const pending = pendingMessageRef.current;
+        pendingMessageRef.current = null;
+
+        // Small delay to let state settle after previous generation
+        setTimeout(() => {
+          sendMessageRef.current?.(new Event('submit') as any, pending);
+        }, 100);
+      }
+    }, [isLoading]);
+
     const runAnimation = async () => {
       if (chatStarted) {
         return;
@@ -397,7 +445,11 @@ export const ChatImpl = memo(
       }
 
       if (isLoading) {
-        abort();
+        // Queue the message to send after current generation completes
+        pendingMessageRef.current = messageContent;
+        setInput('');
+        toast.info('Message queued — will send after current generation completes');
+
         return;
       }
 
@@ -412,16 +464,37 @@ export const ChatImpl = memo(
 
       runAnimation();
 
-      // Start Coolify container provisioning immediately — don't wait for LLM response
-      if (coolifySettingsState.enabled) {
+      // Reset cross-artifact dedup tracking for the new user turn
+      workbenchStore.resetExecutionTracking();
+
+      /*
+       * Provision Coolify container and wait for it to be ready BEFORE sending the LLM prompt.
+       * This ensures the container is fully up so file actions and commands execute immediately.
+       */
+      if (coolifySettingsState.autoProvision) {
         const provisionId = chatId.get() || `chat-${Date.now()}`;
-        workbenchStore.startCoolifyProvisioning(provisionId);
+        setFakeLoading(true);
+
+        try {
+          const PROVISION_TIMEOUT = 90_000; // 90s max wait
+          await Promise.race([
+            workbenchStore.startCoolifyProvisioning(provisionId),
+            new Promise((_, reject) =>
+              setTimeout(() => reject(new Error('Container provisioning timed out')), PROVISION_TIMEOUT),
+            ),
+          ]);
+        } catch (err: any) {
+          logger.error('Coolify provisioning failed:', err);
+          toast.error(`Container setup failed: ${err.message || 'Unknown error'}. Continuing without container.`);
+        } finally {
+          setFakeLoading(false);
+        }
       }
 
       if (!chatStarted) {
         setFakeLoading(true);
 
-        if (autoSelectTemplate && !coolifySettingsState.enabled) {
+        if (autoSelectTemplate && !coolifySettingsState.autoProvision) {
           const { template, title } = await selectStarterTemplate({
             message: finalMessageContent,
             model,
@@ -564,6 +637,9 @@ export const ChatImpl = memo(
 
       textareaRef.current?.blur();
     };
+
+    // Keep ref in sync so the pending-message effect can call sendMessage
+    sendMessageRef.current = sendMessage;
 
     /**
      * Handles the change event for the textarea and updates the input state.

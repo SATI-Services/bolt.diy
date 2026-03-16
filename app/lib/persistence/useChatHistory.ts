@@ -19,7 +19,6 @@ import {
 } from './db';
 import type { FileMap } from '~/lib/stores/files';
 import type { Snapshot } from './types';
-import { webcontainer } from '~/lib/webcontainer';
 import { detectProjectCommands, createCommandActionsString } from '~/utils/projectCommands';
 import type { ContextAnnotation } from '~/types/context';
 
@@ -68,10 +67,34 @@ export function useChatHistory() {
         getSnapshot(db, mixedId), // Fetch snapshot from DB
       ])
         .then(async ([storedMessages, snapshot]) => {
-          /*
-           * Phase 4D disabled: server-side chat persistence requires Node.js fs
-           * which isn't available in the wrangler/workerd runtime.
-           */
+          // Server-side fallback: if no local data, try fetching from server
+          if ((!storedMessages || storedMessages.messages.length === 0) && mixedId) {
+            try {
+              const resp = await fetch(`/api/chats/${encodeURIComponent(mixedId)}`);
+
+              if (resp.ok) {
+                const serverChat = (await resp.json()) as Record<string, any>;
+
+                if (serverChat.messages?.length > 0) {
+                  // Populate IndexedDB with the server data
+                  await setMessages(
+                    db,
+                    serverChat.id || mixedId,
+                    serverChat.messages,
+                    serverChat.urlId || mixedId,
+                    serverChat.description,
+                    serverChat.updatedAt,
+                    serverChat.metadata,
+                  );
+
+                  // Re-read from IDB so the rest of the flow is consistent
+                  storedMessages = await getMessages(db, mixedId);
+                }
+              }
+            } catch (e) {
+              console.warn('Server chat fetch failed:', e);
+            }
+          }
 
           if (storedMessages && storedMessages.messages.length > 0) {
             /*
@@ -178,12 +201,16 @@ ${value.content}
               restoreSnapshot(mixedId);
             }
 
-            setInitialMessages(filteredMessages);
-
+            /*
+             * Set chatId BEFORE initialMessages so that useEffect watchers
+             * on initialMessages can read chatId.get() immediately.
+             */
+            chatId.set(storedMessages.id);
             setUrlId(storedMessages.urlId);
             description.set(storedMessages.description);
-            chatId.set(storedMessages.id);
             chatMetadata.set(storedMessages.metadata);
+
+            setInitialMessages(filteredMessages);
           } else {
             navigate('/', { replace: true });
           }
@@ -227,37 +254,25 @@ ${value.content}
     [db],
   );
 
-  const restoreSnapshot = useCallback(async (id: string, snapshot?: Snapshot) => {
-    // const snapshotStr = localStorage.getItem(`snapshot:${id}`); // Remove localStorage usage
-    const container = await webcontainer;
-
+  const restoreSnapshot = useCallback(async (_id: string, snapshot?: Snapshot) => {
     const validSnapshot = snapshot || { chatIndex: '', files: {} };
 
     if (!validSnapshot?.files) {
       return;
     }
 
-    Object.entries(validSnapshot.files).forEach(async ([key, value]) => {
-      if (key.startsWith(container.workdir)) {
-        key = key.replace(container.workdir, '');
-      }
-
+    // Restore files into the workbench files store
+    for (const [key, value] of Object.entries(validSnapshot.files)) {
       if (value?.type === 'folder') {
-        await container.fs.mkdir(key, { recursive: true });
+        workbenchStore.files.setKey(key, { type: 'folder' });
+      } else if (value?.type === 'file') {
+        workbenchStore.files.setKey(key, {
+          type: 'file',
+          content: value.content,
+          isBinary: value.isBinary,
+        });
       }
-    });
-    Object.entries(validSnapshot.files).forEach(async ([key, value]) => {
-      if (value?.type === 'file') {
-        if (key.startsWith(container.workdir)) {
-          key = key.replace(container.workdir, '');
-        }
-
-        await container.fs.writeFile(key, value.content, { encoding: value.isBinary ? undefined : 'utf8' });
-      } else {
-      }
-    });
-
-    // workbenchStore.files.setKey(snapshot?.files)
+    }
   }, []);
 
   return {
@@ -337,21 +352,33 @@ ${value.content}
         return;
       }
 
+      const allMessages = [...archivedMessages, ...messages];
+
       await setMessages(
         db,
         finalChatId, // Use the potentially updated chatId
-        [...archivedMessages, ...messages],
+        allMessages,
         urlId,
         description.get(),
         undefined,
         chatMetadata.get(),
       );
 
-      /*
-       * Phase 4C disabled: server-side chat persistence requires Node.js fs
-       * which isn't available in the wrangler/workerd runtime. Re-enable when
-       * switching to a compatible storage backend (D1, KV, etc).
-       */
+      // Dual-write: persist to server for cross-browser sharing (fire-and-forget)
+      if (urlId) {
+        fetch(`/api/chats/${encodeURIComponent(urlId)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            urlId,
+            id: finalChatId,
+            description: description.get(),
+            messages: allMessages,
+            metadata: chatMetadata.get(),
+            updatedAt: new Date().toISOString(),
+          }),
+        }).catch((e) => console.warn('Failed to sync chat to server:', e));
+      }
     },
     duplicateCurrentChat: async (listItemId: string) => {
       if (!db || (!mixedId && !listItemId)) {

@@ -1,65 +1,28 @@
-import type { WebContainer, WebContainerProcess } from '@webcontainer/api';
 import { atom, type WritableAtom } from 'nanostores';
 import type { ITerminal } from '~/types/terminal';
-import { newBoltShellProcess, newShellProcess } from '~/utils/shell';
 import { coloredText } from '~/utils/terminal';
-import { coolifySettings } from '~/lib/stores/coolify';
 import { coolifyContainers } from '~/lib/stores/coolifyPreview';
 
 export class TerminalStore {
-  #webcontainer: Promise<WebContainer>;
-  #terminals: Array<{ terminal: ITerminal; process: WebContainerProcess }> = [];
   #coolifyTerminals: Array<{ terminal: ITerminal; ws: WebSocket }> = [];
-  #boltTerminal = newBoltShellProcess();
 
   showTerminal: WritableAtom<boolean> = import.meta.hot?.data.showTerminal ?? atom(true);
 
-  constructor(webcontainerPromise: Promise<WebContainer>) {
-    this.#webcontainer = webcontainerPromise;
-
+  constructor() {
     if (import.meta.hot) {
       import.meta.hot.data.showTerminal = this.showTerminal;
     }
-  }
-  get boltTerminal() {
-    return this.#boltTerminal;
   }
 
   toggleTerminal(value?: boolean) {
     this.showTerminal.set(value !== undefined ? value : !this.showTerminal.get());
   }
   async attachBoltTerminal(terminal: ITerminal) {
-    const settings = coolifySettings.get();
-
-    if (settings.enabled) {
-      await this.#attachCoolifyTerminal(terminal);
-      return;
-    }
-
-    try {
-      const wc = await this.#webcontainer;
-      await this.#boltTerminal.init(wc, terminal);
-    } catch (error: any) {
-      terminal.write(coloredText.red('Failed to spawn bolt shell\n\n') + error.message);
-      return;
-    }
+    await this.#attachCoolifyTerminal(terminal);
   }
 
   async attachTerminal(terminal: ITerminal) {
-    const settings = coolifySettings.get();
-
-    if (settings.enabled) {
-      await this.#attachCoolifyTerminal(terminal);
-      return;
-    }
-
-    try {
-      const shellProcess = await newShellProcess(await this.#webcontainer, terminal);
-      this.#terminals.push({ terminal, process: shellProcess });
-    } catch (error: any) {
-      terminal.write(coloredText.red('Failed to spawn shell\n\n') + error.message);
-      return;
-    }
+    await this.#attachCoolifyTerminal(terminal);
   }
 
   async #attachCoolifyTerminal(terminal: ITerminal) {
@@ -79,7 +42,7 @@ export class TerminalStore {
     let container = findRunningContainer();
 
     if (!container) {
-      terminal.write('\x1b[33mWaiting for Coolify container to be ready...\x1b[0m\r\n');
+      terminal.write('\x1b[33mWaiting for container to be ready...\x1b[0m\r\n');
 
       // Poll until a container is running (max 60 attempts = ~120 seconds)
       for (let i = 0; i < 60; i++) {
@@ -112,7 +75,7 @@ export class TerminalStore {
       const ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
-        terminal.write('\x1b[32mConnected to Coolify container\x1b[0m\r\n');
+        terminal.write('\x1b[32mConnected to container\x1b[0m\r\n');
 
         // Send initial resize
         ws.send(
@@ -133,7 +96,7 @@ export class TerminalStore {
       };
 
       ws.onclose = () => {
-        terminal.write('\r\n\x1b[31mDisconnected from Coolify container\x1b[0m\r\n');
+        terminal.write('\r\n\x1b[31mDisconnected from container\x1b[0m\r\n');
       };
 
       ws.onerror = () => {
@@ -149,16 +112,12 @@ export class TerminalStore {
 
       this.#coolifyTerminals.push({ terminal, ws });
     } catch (error: any) {
-      terminal.write(coloredText.red('Failed to connect to Coolify terminal\r\n') + error.message);
+      terminal.write(coloredText.red('Failed to connect to terminal\r\n') + error.message);
     }
   }
 
   onTerminalResize(cols: number, rows: number) {
-    for (const { process } of this.#terminals) {
-      process.resize({ cols, rows });
-    }
-
-    // Also resize Coolify terminals
+    // Resize all terminals
     for (const { ws } of this.#coolifyTerminals) {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'resize', cols, rows }));
@@ -167,7 +126,6 @@ export class TerminalStore {
   }
 
   async detachTerminal(terminal: ITerminal) {
-    // Check Coolify terminals first
     const coolifyIdx = this.#coolifyTerminals.findIndex((t) => t.terminal === terminal);
 
     if (coolifyIdx !== -1) {
@@ -180,21 +138,6 @@ export class TerminalStore {
       }
 
       this.#coolifyTerminals.splice(coolifyIdx, 1);
-
-      return;
-    }
-
-    const terminalIndex = this.#terminals.findIndex((t) => t.terminal === terminal);
-
-    if (terminalIndex !== -1) {
-      const { process } = this.#terminals[terminalIndex];
-
-      try {
-        process.kill();
-      } catch (error) {
-        console.warn('Failed to kill terminal process:', error);
-      }
-      this.#terminals.splice(terminalIndex, 1);
     }
   }
 }

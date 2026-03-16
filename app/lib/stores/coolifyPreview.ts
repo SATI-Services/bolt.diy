@@ -20,6 +20,34 @@ function persistContainers() {
   }
 }
 
+/**
+ * Re-key a container entry when the real chatId becomes available.
+ * Moves container from tempId to realId in the containers map.
+ */
+export function rekeyContainer(tempId: string, realId: string) {
+  if (tempId === realId) {
+    return;
+  }
+
+  const containers = coolifyContainers.get();
+  const container = containers[tempId];
+
+  if (!container) {
+    return;
+  }
+
+  coolifyContainers.setKey(realId, { ...container, chatId: realId });
+  coolifyContainers.setKey(tempId, undefined as any);
+
+  // Clean up the old key by rebuilding the map without it
+  const updated = { ...coolifyContainers.get() };
+  delete updated[tempId];
+  coolifyContainers.set(updated);
+
+  persistContainers();
+  logger.debug(`Re-keyed container from ${tempId} to ${realId}`);
+}
+
 function generateToken(): string {
   const array = new Uint8Array(32);
   crypto.getRandomValues(array);
@@ -36,7 +64,7 @@ export async function provisionContainer(chatId: string): Promise<CoolifyContain
   const connection = coolifyConnection.get();
   const settings = coolifySettings.get();
 
-  if (!connection.connected || !settings.enabled) {
+  if (!connection.connected) {
     return null;
   }
 
@@ -50,6 +78,8 @@ export async function provisionContainer(chatId: string): Promise<CoolifyContain
   const sidecarToken = generateToken();
   const sidecarPort = generateSidecarPort();
   const appName = `bolt-preview-${chatId.slice(0, 8)}-${Date.now().toString(36)}`;
+
+  const toastId = toast.loading('Creating preview container...', { autoClose: false });
 
   try {
     logger.debug(`Provisioning container for chat ${chatId} (sidecar port: ${sidecarPort})`);
@@ -79,15 +109,11 @@ export async function provisionContainer(chatId: string): Promise<CoolifyContain
       logger.warn('Failed to set custom domain, using Coolify default:', e);
     }
 
-    // Patch Traefik labels to add CORP headers for iframe embedding
-    try {
-      await coolifyApi.patchCoolifyLabelsForCORP(apiOptions, app.uuid);
-    } catch (e) {
-      logger.warn('Failed to patch CORP labels:', e);
-    }
-
-    // Now start the app (env vars, domain, and labels are set)
-    await coolifyApi.startApp(apiOptions, app.uuid);
+    /*
+     * NOTE: startApp is deferred to the polling loop below.
+     * Making 4+ rapid sequential fetch calls to /api/coolify-proxy from the browser
+     * causes workerd to silently drop requests. Starting inside the poll avoids this.
+     */
 
     /*
      * Sidecar HTTP API URL — accessed via server-side proxy (/api/sidecar-proxy).
@@ -110,60 +136,57 @@ export async function provisionContainer(chatId: string): Promise<CoolifyContain
     coolifyContainers.setKey(chatId, containerState);
     persistContainers();
 
-    // Poll until running — check both Coolify status and sidecar reachability
+    // Poll until running — check sidecar health directly (most reliable)
     const maxPolls = 30;
     let polls = 0;
+    let appStarted = false;
 
     while (polls < maxPolls) {
+      // Sleep FIRST to give workerd time to recover from the rapid create/env/domain fetches
       await new Promise((resolve) => setTimeout(resolve, 5000));
       polls++;
 
-      try {
-        const appStatus = await coolifyApi.getApp(apiOptions, app.uuid);
-        const status = appStatus.status || '';
-
-        // Determine actual sidecar URL from Coolify's port mapping
-        let actualSidecarUrl = containerState.wsUrl;
-
-        if (appStatus.ports_mappings) {
-          const mapping = appStatus.ports_mappings.split(',')[0]; // e.g. "19924:9839"
-          const actualHostPort = mapping?.split(':')[0];
-
-          if (actualHostPort) {
-            actualSidecarUrl = `http://localhost:${actualHostPort}`;
-          }
+      // Start the app after the first sleep (deferred to avoid workerd fetch-dropping)
+      if (!appStarted) {
+        try {
+          toast.update(toastId, { render: 'Starting container...' });
+          logger.debug(`Starting app ${app.uuid}...`);
+          await coolifyApi.startApp(apiOptions, app.uuid);
+          logger.debug(`Start request sent for ${app.uuid}`);
+          appStarted = true;
+        } catch (e) {
+          logger.error('Failed to start app:', e);
         }
 
-        // Accept running (any health) or check sidecar directly if status is ambiguous
-        const isRunning = status.startsWith('running');
+        continue; // Skip health check this iteration — container just started
+      }
+
+      try {
+        /*
+         * Try reaching sidecar directly — this is the most reliable check
+         * Coolify status can report "exited:unhealthy" even when container is up
+         */
         let sidecarReachable = false;
 
-        if (!isRunning) {
-          // Try reaching sidecar directly — container may be up even if Coolify reports unhealthy
-          try {
-            const healthResp = await fetch('/api/sidecar-proxy', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                sidecarUrl: actualSidecarUrl,
-                token: containerState.sidecarToken,
-                endpoint: '/health',
-                method: 'GET',
-              }),
-            });
-            sidecarReachable = healthResp.ok;
-          } catch {
-            // ignore
-          }
+        try {
+          const healthResp = await fetch('/api/sidecar-proxy', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sidecarUrl,
+              token: containerState.sidecarToken,
+              endpoint: '/health',
+              method: 'GET',
+            }),
+          });
+          sidecarReachable = healthResp.ok;
+        } catch {
+          // ignore — container not ready yet
         }
 
-        if (isRunning || sidecarReachable) {
-          const domain = appStatus.fqdn || containerState.domain;
-
+        if (sidecarReachable) {
           const updatedState: CoolifyContainerState = {
             ...containerState,
-            domain,
-            wsUrl: actualSidecarUrl,
             status: 'running',
             lastActivity: Date.now(),
           };
@@ -171,15 +194,14 @@ export async function provisionContainer(chatId: string): Promise<CoolifyContain
           coolifyContainers.setKey(chatId, updatedState);
           persistContainers();
 
-          logger.debug(
-            `Container running for chat ${chatId}: ${domain} (coolify: ${status}, sidecar: ${actualSidecarUrl})`,
-          );
-          toast.success('Coolify preview container is ready');
+          logger.debug(`Container running for chat ${chatId}: ${customDomain} (sidecar: ${sidecarUrl})`);
+          toast.update(toastId, { render: 'Container is ready', type: 'success', isLoading: false, autoClose: 3000 });
 
           return updatedState;
         }
 
-        logger.debug(`Poll ${polls}/${maxPolls}: status=${status}`);
+        toast.update(toastId, { render: `Waiting for container... (${polls}/${maxPolls})` });
+        logger.debug(`Poll ${polls}/${maxPolls}: sidecar not ready yet`);
       } catch (error) {
         logger.error('Error polling container status:', error);
       }
@@ -192,11 +214,17 @@ export async function provisionContainer(chatId: string): Promise<CoolifyContain
     };
     coolifyContainers.setKey(chatId, timeoutState);
     persistContainers();
-    toast.error('Coolify container provisioning timed out');
+    toast.update(toastId, {
+      render: 'Container provisioning timed out',
+      type: 'error',
+      isLoading: false,
+      autoClose: 5000,
+    });
 
     return null;
   } catch (error) {
     logger.error('Failed to provision container:', error);
+    toast.dismiss(toastId);
     toast.error('Failed to provision Coolify container');
 
     return null;

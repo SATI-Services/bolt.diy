@@ -133,6 +133,11 @@ export async function deleteApp(options: CoolifyApiOptions, uuid: string): Promi
 }
 
 export async function startApp(options: CoolifyApiOptions, uuid: string): Promise<void> {
+  /*
+   * Coolify's /start queues a full deployment — it pulls the image,
+   * generates docker-compose with port mappings, and starts the container.
+   * This takes ~60 seconds to complete.
+   */
   const response = await coolifyFetch(options, `/applications/${uuid}/start`, 'POST');
 
   if (!response.ok) {

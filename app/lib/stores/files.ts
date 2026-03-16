@@ -1,9 +1,5 @@
-import type { PathWatcherEvent, WebContainer } from '@webcontainer/api';
-import { getEncoding } from 'istextorbinary';
 import { map, type MapStore } from 'nanostores';
 import { Buffer } from 'node:buffer';
-import { path } from '~/utils/path';
-import { bufferWatchEvents } from '~/utils/buffer';
 import { WORK_DIR } from '~/utils/constants';
 import { computeFileModifications } from '~/utils/diff';
 import { createScopedLogger } from '~/utils/logger';
@@ -21,10 +17,9 @@ import {
   clearCache,
 } from '~/lib/persistence/lockedFiles';
 import { getCurrentChatId } from '~/utils/fileLocks';
+import { getCoolifyFileSyncService } from '~/lib/services/coolifyFileSyncService';
 
 const logger = createScopedLogger('FilesStore');
-
-const utf8TextDecoder = new TextDecoder('utf8', { fatal: true });
 
 export interface File {
   type: 'file';
@@ -45,8 +40,6 @@ type Dirent = File | Folder;
 export type FileMap = Record<string, Dirent | undefined>;
 
 export class FilesStore {
-  #webcontainer: Promise<WebContainer>;
-
   /**
    * Tracks the number of files without folders.
    */
@@ -65,7 +58,7 @@ export class FilesStore {
   #deletedPaths: Set<string> = import.meta.hot?.data.deletedPaths ?? new Set();
 
   /**
-   * Map of files that matches the state of WebContainer.
+   * Map of files that matches the state of the container.
    */
   files: MapStore<FileMap> = import.meta.hot?.data.files ?? map({});
 
@@ -73,9 +66,7 @@ export class FilesStore {
     return this.#size;
   }
 
-  constructor(webcontainerPromise: Promise<WebContainer>) {
-    this.#webcontainer = webcontainerPromise;
-
+  constructor() {
     // Load deleted paths from localStorage if available
     try {
       if (typeof localStorage !== 'undefined') {
@@ -493,17 +484,66 @@ export class FilesStore {
   }
 
   /**
-   * Directly update the files nanostore without touching WebContainer.
-   * Used in Coolify mode where files go only to the sidecar.
+   * Sync the file tree from a Coolify container into the files store.
+   * Called after shell commands (like scaffold commands) that create files
+   * outside of <boltAction type="file"> actions.
+   */
+  async syncFilesFromContainer(): Promise<void> {
+    const syncService = getCoolifyFileSyncService();
+
+    if (!syncService.connected) {
+      return;
+    }
+
+    const fileList = await syncService.listFiles('.');
+
+    if (!fileList) {
+      return;
+    }
+
+    for (const [relativePath, info] of Object.entries(fileList)) {
+      const fullPath = `${WORK_DIR}/${relativePath}`;
+
+      if (info.type === 'folder') {
+        if (!this.files.get()[fullPath]) {
+          this.files.setKey(fullPath, { type: 'folder' });
+        }
+      } else if (info.type === 'file') {
+        // Only add files we don't already have (don't overwrite LLM-written content)
+        if (!this.files.get()[fullPath] && !info.tooLarge) {
+          const result = await syncService.readFile(relativePath);
+
+          if (result && !result.isBinary && result.content !== null) {
+            this.#size++;
+            this.files.setKey(fullPath, { type: 'file', content: result.content, isBinary: false });
+          } else if (result?.isBinary) {
+            this.#size++;
+            this.files.setKey(fullPath, { type: 'file', content: '', isBinary: true });
+          }
+        }
+      }
+    }
+
+    logger.info(`Synced ${Object.keys(fileList).length} entries from container`);
+  }
+
+  /**
+   * Directly update the files nanostore without touching the container.
+   * Used when files go to the sidecar via action callbacks.
    */
   setFileFromAction(filePath: string, content: string) {
-    // Ensure parent directory entries exist in the map
+    // Ensure parent directory entries exist in the map, but only within WORK_DIR.
     const parts = filePath.split('/');
 
     for (let i = 1; i < parts.length; i++) {
       const dirPath = parts.slice(0, i).join('/');
 
-      if (dirPath && !this.files.get()[dirPath]) {
+      // Skip directories above or equal to WORK_DIR (e.g. /home, /home/project)
+      if (!dirPath || dirPath.length <= WORK_DIR.length) {
+        continue;
+      }
+
+      if (!this.files.get()[dirPath]) {
         this.files.setKey(dirPath, { type: 'folder' });
       }
     }
@@ -573,22 +613,17 @@ export class FilesStore {
   }
 
   async saveFile(filePath: string, content: string) {
-    const webcontainer = await this.#webcontainer;
-
     try {
-      const relativePath = path.relative(webcontainer.workdir, filePath);
-
-      if (!relativePath) {
-        throw new Error(`EINVAL: invalid file path, write '${relativePath}'`);
-      }
-
       const oldContent = this.getFile(filePath)?.content;
 
       if (!oldContent && oldContent !== '') {
         unreachable('Expected content to be defined');
       }
 
-      await webcontainer.fs.writeFile(relativePath, content);
+      // Write to the sidecar
+      const syncService = getCoolifyFileSyncService();
+      const relativePath = filePath.startsWith(WORK_DIR) ? filePath.slice(WORK_DIR.length + 1) : filePath;
+      syncService.writeFile(relativePath, content);
 
       if (!this.#modifiedFiles.has(filePath)) {
         this.#modifiedFiles.set(filePath, oldContent);
@@ -615,20 +650,11 @@ export class FilesStore {
   }
 
   async #init() {
-    const webcontainer = await this.#webcontainer;
-
     // Clean up any files that were previously deleted
     this.#cleanupDeletedFiles();
 
-    // Set up file watcher
-    webcontainer.internal.watchPaths(
-      {
-        include: [`${WORK_DIR}/**`],
-        exclude: ['**/node_modules', '.git', '**/package-lock.json'],
-        includeContent: true,
-      },
-      bufferWatchEvents(100, this.#processEventBuffer.bind(this)),
-    );
+    // Connect to sidecar's /watch SSE endpoint for file change events
+    this.#connectFileWatcher();
 
     // Get the current chat ID
     const currentChatId = getCurrentChatId();
@@ -649,7 +675,6 @@ export class FilesStore {
 
     /**
      * Set up a less frequent periodic check to ensure locks remain applied.
-     * This is now less critical since we have the storage event listener.
      */
     setInterval(() => {
       // Clear the cache to force a fresh read from localStorage
@@ -657,7 +682,161 @@ export class FilesStore {
 
       const latestChatId = getCurrentChatId();
       this.#loadLockedFiles(latestChatId);
-    }, 30000); // Reduced from 10s to 30s
+    }, 30000);
+  }
+
+  /**
+   * Connect to sidecar's /watch SSE endpoint for real-time file change events.
+   * Falls back gracefully if the sidecar is not yet available.
+   */
+  #connectFileWatcher() {
+    const syncService = getCoolifyFileSyncService();
+
+    // Poll until connected, then start watching
+    const tryConnect = () => {
+      if (!syncService.connected) {
+        setTimeout(tryConnect, 3000);
+        return;
+      }
+
+      /*
+       * The sidecar's /watch endpoint provides SSE events for file changes.
+       * We'll use the sync service's proxy to connect.
+       */
+      this.#startWatchSSE();
+    };
+
+    // Start trying after a short delay
+    setTimeout(tryConnect, 1000);
+  }
+
+  async #startWatchSSE() {
+    try {
+      const syncService = getCoolifyFileSyncService();
+
+      // Use the sidecar proxy to connect to the /watch SSE endpoint
+      const response = await fetch('/api/sidecar-proxy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sidecarUrl: (syncService as any).sidecarUrl || '',
+          token: (syncService as any).token || '',
+          endpoint: '/watch',
+          method: 'GET',
+          stream: true,
+        }),
+      });
+
+      if (!response.ok || !response.body) {
+        logger.warn('Failed to connect to file watcher, will retry');
+        setTimeout(() => this.#startWatchSSE(), 5000);
+
+        return;
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      const processStream = async () => {
+        while (true) {
+          const { done, value } = await reader.read();
+
+          if (done) {
+            // SSE stream ended, try to reconnect
+            logger.info('File watcher stream ended, reconnecting...');
+            setTimeout(() => this.#startWatchSSE(), 2000);
+
+            return;
+          }
+
+          buffer += decoder.decode(value, { stream: true });
+
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const event = JSON.parse(line.slice(6));
+                this.#handleWatchEvent(event);
+              } catch {
+                // ignore malformed SSE
+              }
+            }
+          }
+        }
+      };
+
+      processStream().catch((err) => {
+        logger.warn('File watcher error:', err);
+        setTimeout(() => this.#startWatchSSE(), 5000);
+      });
+    } catch (error) {
+      logger.warn('File watcher connection failed:', error);
+      setTimeout(() => this.#startWatchSSE(), 5000);
+    }
+  }
+
+  #handleWatchEvent(event: { type: string; path: string; content?: string }) {
+    const fullPath = `${WORK_DIR}/${event.path}`;
+
+    // Skip if this path was deleted by the user
+    if (this.#deletedPaths.has(fullPath)) {
+      return;
+    }
+
+    switch (event.type) {
+      case 'addDir': {
+        this.files.setKey(fullPath, { type: 'folder' });
+        break;
+      }
+      case 'unlinkDir': {
+        this.files.setKey(fullPath, undefined);
+
+        for (const [direntPath] of Object.entries(this.files)) {
+          if (direntPath.startsWith(fullPath)) {
+            this.files.setKey(direntPath, undefined);
+          }
+        }
+
+        break;
+      }
+      case 'add':
+      case 'change': {
+        /*
+         * Don't overwrite files that the editor/LLM just wrote
+         * (the sidecar will echo back changes we made)
+         */
+        const existing = this.files.get()[fullPath];
+
+        if (existing?.type === 'file' && event.content && existing.content === event.content) {
+          // Content is the same, skip
+          break;
+        }
+
+        if (event.type === 'add' && !existing) {
+          this.#size++;
+        }
+
+        const content = event.content || '';
+        const isBinary = !event.content; // If no content provided, assume binary
+
+        this.files.setKey(fullPath, { type: 'file', content, isBinary });
+
+        break;
+      }
+      case 'unlink': {
+        const existed = this.files.get()[fullPath];
+
+        if (existed?.type === 'file') {
+          this.#size--;
+        }
+
+        this.files.setKey(fullPath, undefined);
+        break;
+      }
+    }
   }
 
   /**
@@ -718,101 +897,18 @@ export class FilesStore {
     }
   }
 
-  #processEventBuffer(events: Array<[events: PathWatcherEvent[]]>) {
-    const watchEvents = events.flat(2);
-
-    for (const { type, path, buffer } of watchEvents) {
-      // remove any trailing slashes
-      const sanitizedPath = path.replace(/\/+$/g, '');
-
-      switch (type) {
-        case 'add_dir': {
-          // we intentionally add a trailing slash so we can distinguish files from folders in the file tree
-          this.files.setKey(sanitizedPath, { type: 'folder' });
-          break;
-        }
-        case 'remove_dir': {
-          this.files.setKey(sanitizedPath, undefined);
-
-          for (const [direntPath] of Object.entries(this.files)) {
-            if (direntPath.startsWith(sanitizedPath)) {
-              this.files.setKey(direntPath, undefined);
-            }
-          }
-
-          break;
-        }
-        case 'add_file':
-        case 'change': {
-          if (type === 'add_file') {
-            this.#size++;
-          }
-
-          let content = '';
-
-          /**
-           * @note This check is purely for the editor. The way we detect this is not
-           * bullet-proof and it's a best guess so there might be false-positives.
-           * The reason we do this is because we don't want to display binary files
-           * in the editor nor allow to edit them.
-           */
-          const isBinary = isBinaryFile(buffer);
-
-          if (!isBinary) {
-            content = this.#decodeFileContent(buffer);
-          }
-
-          this.files.setKey(sanitizedPath, { type: 'file', content, isBinary });
-
-          break;
-        }
-        case 'remove_file': {
-          this.#size--;
-          this.files.setKey(sanitizedPath, undefined);
-          break;
-        }
-        case 'update_directory': {
-          // we don't care about these events
-          break;
-        }
-      }
-    }
-  }
-
-  #decodeFileContent(buffer?: Uint8Array) {
-    if (!buffer || buffer.byteLength === 0) {
-      return '';
-    }
-
-    try {
-      return utf8TextDecoder.decode(buffer);
-    } catch (error) {
-      console.log(error);
-      return '';
-    }
-  }
-
   async createFile(filePath: string, content: string | Uint8Array = '') {
-    const webcontainer = await this.#webcontainer;
-
     try {
-      const relativePath = path.relative(webcontainer.workdir, filePath);
+      const syncService = getCoolifyFileSyncService();
+      const relativePath = filePath.startsWith(WORK_DIR) ? filePath.slice(WORK_DIR.length + 1) : filePath;
 
       if (!relativePath) {
         throw new Error(`EINVAL: invalid file path, create '${relativePath}'`);
       }
 
-      const dirPath = path.dirname(relativePath);
-
-      if (dirPath !== '.') {
-        await webcontainer.fs.mkdir(dirPath, { recursive: true });
-      }
-
       const isBinary = content instanceof Uint8Array;
 
       if (isBinary) {
-        await webcontainer.fs.writeFile(relativePath, Buffer.from(content));
-
         const base64Content = Buffer.from(content).toString('base64');
         this.files.setKey(filePath, {
           type: 'file',
@@ -824,7 +920,7 @@ export class FilesStore {
         this.#modifiedFiles.set(filePath, base64Content);
       } else {
         const contentToWrite = (content as string).length === 0 ? ' ' : content;
-        await webcontainer.fs.writeFile(relativePath, contentToWrite);
+        syncService.writeFile(relativePath, contentToWrite as string);
 
         this.files.setKey(filePath, {
           type: 'file',
@@ -846,16 +942,15 @@ export class FilesStore {
   }
 
   async createFolder(folderPath: string) {
-    const webcontainer = await this.#webcontainer;
-
     try {
-      const relativePath = path.relative(webcontainer.workdir, folderPath);
+      const syncService = getCoolifyFileSyncService();
+      const relativePath = folderPath.startsWith(WORK_DIR) ? folderPath.slice(WORK_DIR.length + 1) : folderPath;
 
       if (!relativePath) {
         throw new Error(`EINVAL: invalid folder path, create '${relativePath}'`);
       }
 
-      await webcontainer.fs.mkdir(relativePath, { recursive: true });
+      syncService.mkdir(relativePath);
 
       this.files.setKey(folderPath, { type: 'folder' });
 
@@ -869,16 +964,15 @@ export class FilesStore {
   }
 
   async deleteFile(filePath: string) {
-    const webcontainer = await this.#webcontainer;
-
     try {
-      const relativePath = path.relative(webcontainer.workdir, filePath);
+      const syncService = getCoolifyFileSyncService();
+      const relativePath = filePath.startsWith(WORK_DIR) ? filePath.slice(WORK_DIR.length + 1) : filePath;
 
       if (!relativePath) {
         throw new Error(`EINVAL: invalid file path, delete '${relativePath}'`);
       }
 
-      await webcontainer.fs.rm(relativePath);
+      syncService.deleteFile(relativePath);
 
       this.#deletedPaths.add(filePath);
 
@@ -901,16 +995,16 @@ export class FilesStore {
   }
 
   async deleteFolder(folderPath: string) {
-    const webcontainer = await this.#webcontainer;
-
     try {
-      const relativePath = path.relative(webcontainer.workdir, folderPath);
+      const syncService = getCoolifyFileSyncService();
+      const relativePath = folderPath.startsWith(WORK_DIR) ? folderPath.slice(WORK_DIR.length + 1) : folderPath;
 
       if (!relativePath) {
         throw new Error(`EINVAL: invalid folder path, delete '${relativePath}'`);
       }
 
-      await webcontainer.fs.rm(relativePath, { recursive: true });
+      // Delete via sidecar exec (rm -rf)
+      await syncService.exec(`rm -rf /app/${relativePath}`);
 
       this.#deletedPaths.add(folderPath);
 
@@ -955,22 +1049,4 @@ export class FilesStore {
       logger.error('Failed to persist deleted paths to localStorage', error);
     }
   }
-}
-
-function isBinaryFile(buffer: Uint8Array | undefined) {
-  if (buffer === undefined) {
-    return false;
-  }
-
-  return getEncoding(convertToBuffer(buffer), { chunkLength: 100 }) === 'binary';
-}
-
-/**
- * Converts a `Uint8Array` into a Node.js `Buffer` by copying the prototype.
- * The goal is to  avoid expensive copies. It does create a new typed array
- * but that's generally cheap as long as it uses the same underlying
- * array buffer.
- */
-function convertToBuffer(view: Uint8Array): Buffer {
-  return Buffer.from(view.buffer, view.byteOffset, view.byteLength);
 }

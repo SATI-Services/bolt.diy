@@ -19,7 +19,6 @@ export interface CoolifyContainerState {
 }
 
 export interface CoolifySettings {
-  enabled: boolean;
   autoProvision: boolean;
   containerTtl: number; // minutes
   sidecarImage: string;

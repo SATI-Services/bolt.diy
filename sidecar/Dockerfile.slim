@@ -1,12 +1,22 @@
-FROM node:20-alpine
+FROM node:20-bookworm-slim
 
-RUN npm install -g ws
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential git curl wget ca-certificates procps \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g pnpm typescript tsx vite && \
+    corepack enable && \
+    curl -fsSL https://bun.sh/install | bash && \
+    ln -sf /root/.bun/bin/bun /usr/local/bin/bun
 
 WORKDIR /app
 
 COPY server.mjs /sidecar/server.mjs
+RUN cd /sidecar && npm init -y && npm install ws node-pty chokidar
 
-EXPOSE 3000 9838
+EXPOSE 3000 9838 9839
 
 ENV SIDECAR_TOKEN=""
 

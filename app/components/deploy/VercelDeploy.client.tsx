@@ -2,8 +2,6 @@ import { toast } from 'react-toastify';
 import { useStore } from '@nanostores/react';
 import { vercelConnection } from '~/lib/stores/vercel';
 import { workbenchStore } from '~/lib/stores/workbench';
-import { webcontainer } from '~/lib/webcontainer';
-import { path } from '~/utils/path';
 import { useState } from 'react';
 import type { ActionCallbackData } from '~/lib/runtime/message-parser';
 import { chatId } from '~/lib/persistence/useChatHistory';
@@ -79,30 +77,28 @@ export function useVercelDeploy() {
       // Notify that build succeeded and deployment is starting
       deployArtifact.runner.handleDeployAction('deploying', 'running', { source: 'vercel' });
 
-      // Get the build files
-      const container = await webcontainer;
+      // Get the build files from the files store
+      const files = workbenchStore.files.get();
+      const fileContents: Record<string, string> = {};
 
       // Remove /home/project from buildPath if it exists
       const buildPath = buildOutput.path.replace('/home/project', '');
 
-      // Check if the build path exists
-      let finalBuildPath = buildPath;
-
-      // List of common output directories to check if the specified build path doesn't exist
+      // Check common build directories
       const commonOutputDirs = [buildPath, '/dist', '/build', '/out', '/output', '/.next', '/public'];
-
-      // Verify the build path exists, or try to find an alternative
+      let finalBuildPath = buildPath;
       let buildPathExists = false;
 
       for (const dir of commonOutputDirs) {
-        try {
-          await container.fs.readdir(dir);
+        const fullDir = `/home/project${dir}`;
+
+        // Check if any files exist under this directory
+        const hasFiles = Object.keys(files).some((p) => p.startsWith(fullDir + '/'));
+
+        if (hasFiles) {
           finalBuildPath = dir;
           buildPathExists = true;
           break;
-        } catch {
-          // Directory doesn't exist, expected — just skip it
-          continue;
         }
       }
 
@@ -110,70 +106,41 @@ export function useVercelDeploy() {
         throw new Error('Could not find build output directory. Please check your build configuration.');
       }
 
-      // Get all files recursively
-      async function getAllFiles(dirPath: string): Promise<Record<string, string>> {
-        const files: Record<string, string> = {};
-        const entries = await container.fs.readdir(dirPath, { withFileTypes: true });
+      const buildPrefix = `/home/project${finalBuildPath}`;
 
-        for (const entry of entries) {
-          const fullPath = path.join(dirPath, entry.name);
-
-          if (entry.isFile()) {
-            const content = await container.fs.readFile(fullPath, 'utf-8');
-
-            // Remove build path prefix from the path
-            const deployPath = fullPath.replace(finalBuildPath, '');
-            files[deployPath] = content;
-          } else if (entry.isDirectory()) {
-            const subFiles = await getAllFiles(fullPath);
-            Object.assign(files, subFiles);
-          }
+      for (const [filePath, dirent] of Object.entries(files)) {
+        if (!dirent || dirent.type !== 'file' || dirent.isBinary) {
+          continue;
         }
 
-        return files;
-      }
+        if (!filePath.startsWith(buildPrefix + '/')) {
+          continue;
+        }
 
-      const fileContents = await getAllFiles(finalBuildPath);
+        const deployPath = filePath.replace(buildPrefix, '');
+        fileContents[deployPath] = dirent.content;
+      }
 
       // Get all source project files for framework detection
       const allProjectFiles: Record<string, string> = {};
 
-      async function getAllProjectFiles(dirPath: string): Promise<void> {
-        const entries = await container.fs.readdir(dirPath, { withFileTypes: true });
-
-        for (const entry of entries) {
-          const fullPath = path.join(dirPath, entry.name);
-
-          if (entry.isFile()) {
-            try {
-              const content = await container.fs.readFile(fullPath, 'utf-8');
-
-              // Store with relative path from project root
-              let relativePath = fullPath;
-
-              if (fullPath.startsWith('/home/project/')) {
-                relativePath = fullPath.replace('/home/project/', '');
-              } else if (fullPath.startsWith('./')) {
-                relativePath = fullPath.replace('./', '');
-              }
-
-              allProjectFiles[relativePath] = content;
-            } catch (error) {
-              // Skip binary files or files that can't be read as text
-              console.log(`Skipping file ${entry.name}: ${error}`);
-            }
-          } else if (entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules') {
-            await getAllProjectFiles(fullPath);
-          }
+      for (const [filePath, dirent] of Object.entries(files)) {
+        if (!dirent || dirent.type !== 'file' || dirent.isBinary) {
+          continue;
         }
-      }
 
-      // Try to read from the current directory first
-      try {
-        await getAllProjectFiles('.');
-      } catch {
-        // Fallback to /home/project if current directory doesn't work
-        await getAllProjectFiles('/home/project');
+        let relativePath = filePath;
+
+        if (filePath.startsWith('/home/project/')) {
+          relativePath = filePath.replace('/home/project/', '');
+        }
+
+        // Skip dotfiles directories and node_modules
+        if (relativePath.startsWith('.') || relativePath.startsWith('node_modules/')) {
+          continue;
+        }
+
+        allProjectFiles[relativePath] = dirent.content;
       }
 
       // Use chatId instead of artifact.id

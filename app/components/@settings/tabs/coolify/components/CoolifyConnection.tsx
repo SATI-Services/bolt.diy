@@ -160,27 +160,6 @@ export default function CoolifyConnection() {
 
         <div className="flex items-center justify-between">
           <div>
-            <span className="text-sm text-bolt-elements-textPrimary">Enable Live Preview</span>
-            <p className="text-xs text-bolt-elements-textSecondary">
-              Deploy preview containers on Coolify for shareable URLs
-            </p>
-          </div>
-          <button
-            className={`w-10 h-5 rounded-full transition-colors duration-200 ${
-              settings.enabled ? 'bg-[#6D28D9]' : 'bg-gray-300 dark:bg-gray-700'
-            } relative`}
-            onClick={() => updateCoolifySettings({ enabled: !settings.enabled })}
-          >
-            <span
-              className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform duration-200 ${
-                settings.enabled ? 'transform translate-x-5' : ''
-              }`}
-            />
-          </button>
-        </div>
-
-        <div className="flex items-center justify-between">
-          <div>
             <span className="text-sm text-bolt-elements-textPrimary">Auto-Provision</span>
             <p className="text-xs text-bolt-elements-textSecondary">
               Automatically create containers for new chat sessions

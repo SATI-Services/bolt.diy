@@ -2,7 +2,6 @@ import { atom, map, type MapStore, type ReadableAtom, type WritableAtom } from '
 import type { EditorDocument, ScrollPosition } from '~/components/editor/codemirror/CodeMirrorEditor';
 import { ActionRunner } from '~/lib/runtime/action-runner';
 import type { ActionCallbackData, ArtifactCallbackData } from '~/lib/runtime/message-parser';
-import { webcontainer } from '~/lib/webcontainer';
 import type { ITerminal } from '~/types/terminal';
 import { unreachable } from '~/utils/unreachable';
 import { EditorStore } from './editor';
@@ -15,12 +14,12 @@ import { Octokit, type RestEndpointMethodTypes } from '@octokit/rest';
 import { path } from '~/utils/path';
 import { WORK_DIR } from '~/utils/constants';
 import { extractRelativePath } from '~/utils/diff';
-import { description } from '~/lib/persistence';
+import { description, chatMetadata } from '~/lib/persistence';
 import Cookies from 'js-cookie';
 import { createSampler } from '~/utils/sampler';
 import type { ActionAlert, DeployAlert, SupabaseAlert } from '~/types/actions';
-import { coolifySettings } from '~/lib/stores/coolify';
-import { coolifyContainers, provisionContainer } from '~/lib/stores/coolifyPreview';
+import { coolifyContainers, provisionContainer, rekeyContainer } from '~/lib/stores/coolifyPreview';
+import type { CoolifyContainerState } from '~/types/coolify';
 import { getCoolifyFileSyncService } from '~/lib/services/coolifyFileSyncService';
 
 const { saveAs } = fileSaver;
@@ -40,10 +39,10 @@ type Artifacts = MapStore<Record<string, ArtifactState>>;
 export type WorkbenchViewType = 'code' | 'diff' | 'preview';
 
 export class WorkbenchStore {
-  #previewsStore = new PreviewsStore(webcontainer);
-  #filesStore = new FilesStore(webcontainer);
+  #previewsStore = new PreviewsStore();
+  #filesStore = new FilesStore();
   #editorStore = new EditorStore(this.#filesStore);
-  #terminalStore = new TerminalStore(webcontainer);
+  #terminalStore = new TerminalStore();
 
   #reloadedMessages = new Set<string>();
 
@@ -63,6 +62,8 @@ export class WorkbenchStore {
   #globalExecutionQueue = Promise.resolve();
   #coolifyProvisionPromise: Promise<unknown> | null = null;
   #coolifyProvisionChatId: string | null = null;
+  #executedFilePaths = new Set<string>();
+  #executedCommands = new Set<string>();
   coolifyProvisionStatus: WritableAtom<'idle' | 'provisioning' | 'ready' | 'error'> = atom<
     'idle' | 'provisioning' | 'ready' | 'error'
   >('idle');
@@ -86,6 +87,63 @@ export class WorkbenchStore {
         }
       }
     }
+  }
+
+  resetExecutionTracking() {
+    this.#executedFilePaths.clear();
+    this.#executedCommands.clear();
+  }
+
+  isActionDuplicate(data: ActionCallbackData): boolean {
+    // Only check file paths here — filePath is available at parse time
+    if (data.action.type === 'file') {
+      const filePath = (data.action as any).filePath;
+
+      if (this.#executedFilePaths.has(filePath)) {
+        return true;
+      }
+
+      this.#executedFilePaths.add(filePath);
+    }
+
+    // Shell/start dedup happens in _runAction where content is complete
+    return false;
+  }
+
+  /**
+   * Normalize a shell command for dedup comparison.
+   * Strips output redirection suffixes, trailing whitespace, and extracts the core command.
+   */
+  #normalizeCommand(cmd: string): string {
+    return cmd
+      .trim()
+      .replace(/\s*2>&1\s*\|.*$/, '') // strip 2>&1 | tail -5 etc.
+      .replace(/\s*\|\s*tail\s.*$/, '') // strip | tail -n ...
+      .replace(/\s*\|\s*head\s.*$/, '') // strip | head -n ...
+      .replace(/\s*>\s*\/dev\/null.*$/, '') // strip > /dev/null
+      .replace(/\s*&&\s*echo\s.*$/, '') // strip && echo "done"
+      .trim();
+  }
+
+  isShellCommandDuplicate(data: ActionCallbackData): boolean {
+    if (data.action.type === 'shell' || data.action.type === 'start') {
+      const cmd = ((data.action as any).content || '').trim();
+
+      if (!cmd) {
+        return false;
+      }
+
+      const normalized = this.#normalizeCommand(cmd);
+
+      if (this.#executedCommands.has(normalized)) {
+        console.debug(`[workbench] Skipping cross-artifact duplicate ${data.action.type}: ${cmd.slice(0, 80)}`);
+        return true;
+      }
+
+      this.#executedCommands.add(normalized);
+    }
+
+    return false;
   }
 
   addToExecutionQueue(callback: () => Promise<void>) {
@@ -119,9 +177,6 @@ export class WorkbenchStore {
   get showTerminal() {
     return this.#terminalStore.showTerminal;
   }
-  get boltTerminal() {
-    return this.#terminalStore.boltTerminal;
-  }
   get alert() {
     return this.actionAlert;
   }
@@ -149,41 +204,123 @@ export class WorkbenchStore {
    * Start provisioning a Coolify container early (when user sends message).
    * The promise is stored so addArtifact can attach it to the action runner.
    */
-  startCoolifyProvisioning(chatId: string) {
-    const settings = coolifySettings.get();
+  async startCoolifyProvisioning(chatId: string): Promise<void> {
+    const containers = coolifyContainers.get();
+    let existing = containers[chatId];
 
-    if (!settings.enabled || !settings.autoProvision) {
-      return;
+    // If no container in localStorage, check chat metadata (survives localStorage clear / cross-browser)
+    if (!existing) {
+      const metadata = chatMetadata.get();
+
+      if (metadata?.coolifyContainer) {
+        const restored: CoolifyContainerState = {
+          ...metadata.coolifyContainer,
+          status: 'running', // assume running — connect() will verify via health check
+          chatId,
+          createdAt: Date.now(),
+          lastActivity: Date.now(),
+        };
+        coolifyContainers.setKey(chatId, restored);
+        existing = restored;
+        console.debug('[workbench] Restored container info from chat metadata for', chatId);
+      }
     }
 
-    const containers = coolifyContainers.get();
-    const existing = containers[chatId];
-
     if (existing && existing.status === 'running' && existing.wsUrl) {
-      // Already running — reconnect (must await connect before resolving)
+      // Already running — try to reconnect, fall back to re-provision if sidecar is down
       const syncService = getCoolifyFileSyncService();
       this.#coolifyProvisionChatId = chatId;
-      this.#coolifyProvisionPromise = syncService.connect(existing.wsUrl, existing.sidecarToken).then(() => {
-        this.#injectCoolifyPreview(existing.domain);
+      this.#coolifyProvisionPromise = syncService
+        .connect(existing.wsUrl, existing.sidecarToken)
+        .then((connected) => {
+          if (connected) {
+            this.#injectCoolifyPreview(existing.domain);
+            this.coolifyProvisionStatus.set('ready');
+            this.#saveContainerToMetadata(existing);
+
+            return existing;
+          }
+
+          // Sidecar unreachable — container may have been cleaned up. Re-provision.
+          console.warn('Container reconnect failed (sidecar unreachable), re-provisioning...');
+
+          return this.#provisionNewContainer(chatId);
+        })
+        .catch((err) => {
+          console.error('Container reconnect failed, re-provisioning:', err);
+
+          return this.#provisionNewContainer(chatId);
+        });
+    } else if (
+      !existing ||
+      existing.status === 'error' ||
+      existing.status === 'stopped' ||
+      existing.status === 'stopping'
+    ) {
+      // No container, errored, or stopped — provision a new one
+      this.#coolifyProvisionPromise = this.#provisionNewContainer(chatId);
+    } else if (existing && existing.status === 'provisioning') {
+      // Already provisioning — just wait for it
+      console.debug('Container already provisioning for chat', chatId);
+    }
+
+    // Wait for provisioning to complete before returning
+    if (this.#coolifyProvisionPromise) {
+      await this.#coolifyProvisionPromise;
+    }
+  }
+
+  /**
+   * Save container info to chat metadata atom so it persists to IDB
+   * on the next storeMessageHistory call. This enables cross-browser reconnection.
+   */
+  #saveContainerToMetadata(container: CoolifyContainerState) {
+    const current = chatMetadata.get() || ({} as any);
+    chatMetadata.set({
+      ...current,
+      coolifyContainer: {
+        appUuid: container.appUuid,
+        domain: container.domain,
+        wsUrl: container.wsUrl,
+        sidecarToken: container.sidecarToken,
+      },
+    });
+  }
+
+  async #provisionNewContainer(chatId: string): Promise<CoolifyContainerState | null> {
+    this.#coolifyProvisionChatId = chatId;
+    this.coolifyProvisionStatus.set('provisioning');
+
+    try {
+      const container = await provisionContainer(chatId);
+
+      if (container) {
+        const syncService = getCoolifyFileSyncService();
+        await syncService.connect(container.wsUrl, container.sidecarToken);
+        this.#injectCoolifyPreview(container.domain);
         this.coolifyProvisionStatus.set('ready');
+        this.#saveContainerToMetadata(container);
+      } else {
+        this.coolifyProvisionStatus.set('error');
+      }
 
-        return existing;
-      });
-    } else if (!existing || existing.status === 'error') {
-      this.#coolifyProvisionChatId = chatId;
-      this.coolifyProvisionStatus.set('provisioning');
-      this.#coolifyProvisionPromise = provisionContainer(chatId).then(async (container) => {
-        if (container) {
-          const syncService = getCoolifyFileSyncService();
-          await syncService.connect(container.wsUrl, container.sidecarToken);
-          this.#injectCoolifyPreview(container.domain);
-          this.coolifyProvisionStatus.set('ready');
-        } else {
-          this.coolifyProvisionStatus.set('error');
-        }
+      return container;
+    } catch (err) {
+      console.error('Container provisioning/connect failed:', err);
+      this.coolifyProvisionStatus.set('error');
 
-        return container;
-      });
+      return null;
+    }
+  }
+
+  /**
+   * Re-key the provisioned container when the real chatId becomes available.
+   * Called after the DB assigns a permanent ID to a new chat.
+   */
+  rekeyProvisionedContainer(realChatId: string) {
+    if (this.#coolifyProvisionChatId && this.#coolifyProvisionChatId !== realChatId) {
+      rekeyContainer(this.#coolifyProvisionChatId, realChatId);
+      this.#coolifyProvisionChatId = realChatId;
     }
   }
 
@@ -523,6 +660,11 @@ export class WorkbenchStore {
       return;
     }
 
+    /*
+     * Note: execution tracking is reset externally (e.g. from Chat.client.tsx sendMessage)
+     * Do NOT reset here — continuations create new messageIds but should share dedup tracking
+     */
+
     if (!this.artifactIdList.includes(id)) {
       this.artifactIdList.push(id);
     }
@@ -533,8 +675,6 @@ export class WorkbenchStore {
       closed: false,
       type,
       runner: new ActionRunner(
-        webcontainer,
-        () => this.boltTerminal,
         (alert) => {
           if (this.#reloadedMessages.has(messageId)) {
             return;
@@ -559,65 +699,62 @@ export class WorkbenchStore {
       ),
     });
 
-    // Wire up Coolify file sync if enabled
-    const settings = coolifySettings.get();
+    // Wire up file sync to sidecar
+    const createdArtifact = this.#getArtifact(id);
 
-    if (settings.enabled) {
-      const artifact = this.#getArtifact(id);
+    if (createdArtifact) {
+      const syncService = getCoolifyFileSyncService();
 
-      if (artifact) {
-        artifact.runner.coolifyEnabled = true;
+      createdArtifact.runner.onFileWrite = (filePath: string, content: string) => {
+        // Normalize path: strip leading ../ segments to get a clean relative path
+        const normalizedPath = filePath.replace(/^(\.\.\/)+/, '');
+        syncService.writeFile(normalizedPath, content);
 
-        const syncService = getCoolifyFileSyncService();
+        // Update the files store directly so the editor/sidebar stays in sync
+        const fullPath = path.join(WORK_DIR, normalizedPath);
+        this.#filesStore.setFileFromAction(fullPath, content);
+      };
 
-        artifact.runner.onFileWrite = (filePath, content) => {
-          /*
-           * Normalize path: strip leading ../ segments to get a clean relative path
-           * WebContainer paths may be relative to a different workdir (e.g. ../../index.html)
-           */
-          const normalizedPath = filePath.replace(/^(\.\.\/)+/, '');
-          syncService.writeFile(normalizedPath, content);
-
-          /*
-           * Update the files store directly so the editor/sidebar stays in sync
-           * without writing to WebContainer
-           */
-          const fullPath = path.join(WORK_DIR, normalizedPath);
-          this.#filesStore.setFileFromAction(fullPath, content);
-        };
-
-        artifact.runner.onShellExec = (command, onOutput) => {
-          return syncService.exec(command, onOutput);
-        };
-
-        artifact.runner.onPreviewUrl = (url: string) => {
-          this.#injectCoolifyPreview(url);
-        };
-
-        // When sidecar reports dev server ready, inject Coolify preview
-        syncService.onServerReady = (data: { port?: number }) => {
-          const containers = coolifyContainers.get();
-          const chatId = messageId;
-          const container = containers[chatId];
-
-          if (container?.domain) {
-            const currentPreviews = this.previews.get();
-            const coolifyUrl = container.domain.startsWith('http') ? container.domain : `https://${container.domain}`;
-
-            // Add Coolify preview if not already present
-            if (!currentPreviews.some((p) => p.baseUrl === coolifyUrl)) {
-              this.previews.set([...currentPreviews, { port: data.port || 3000, ready: true, baseUrl: coolifyUrl }]);
-            }
-          }
-        };
+      createdArtifact.runner.onShellExec = async (command: string, onOutput?: (data: string) => void) => {
+        const result = await syncService.exec(command, onOutput);
 
         /*
-         * Use the pre-started provision promise (from startCoolifyProvisioning)
-         * so actions wait until the container is fully ready
+         * After shell commands complete, sync the file tree from the container
+         * so files created by scaffold commands (composer, npm create, etc.) appear
          */
-        if (this.#coolifyProvisionPromise) {
-          artifact.runner.containerReadyPromise = this.#coolifyProvisionPromise;
+        if (result.exitCode === 0) {
+          this.#filesStore.syncFilesFromContainer().catch((err) => {
+            console.warn('File tree sync after shell exec failed:', err);
+          });
         }
+
+        return result;
+      };
+
+      createdArtifact.runner.onPreviewUrl = (url: string) => {
+        this.#injectCoolifyPreview(url);
+      };
+
+      // When sidecar reports dev server ready, inject preview
+      syncService.onServerReady = (data: { port?: number }) => {
+        const containers = coolifyContainers.get();
+        const chatId = messageId;
+        const container = containers[chatId];
+
+        if (container?.domain) {
+          const currentPreviews = this.previews.get();
+          const coolifyUrl = container.domain.startsWith('http') ? container.domain : `https://${container.domain}`;
+
+          // Add preview if not already present
+          if (!currentPreviews.some((p) => p.baseUrl === coolifyUrl)) {
+            this.previews.set([...currentPreviews, { port: data.port || 3000, ready: true, baseUrl: coolifyUrl }]);
+          }
+        }
+      };
+
+      // Use the pre-started provision promise so actions wait until the container is fully ready
+      if (this.#coolifyProvisionPromise) {
+        createdArtifact.runner.containerReadyPromise = this.#coolifyProvisionPromise;
       }
     }
   }
@@ -636,7 +773,10 @@ export class WorkbenchStore {
     this.artifacts.setKey(artifactId, { ...artifact, ...state });
   }
   addAction(data: ActionCallbackData) {
-    // this._addAction(data);
+    // Cross-artifact dedup: skip actions already seen in a previous artifact for the same message
+    if (this.isActionDuplicate(data)) {
+      return;
+    }
 
     this.addToExecutionQueue(() => this._addAction(data));
   }
@@ -674,9 +814,13 @@ export class WorkbenchStore {
       return;
     }
 
+    // Cross-artifact dedup for shell/start at execution time (content is complete now)
+    if (!isStreaming && this.isShellCommandDuplicate(data)) {
+      return;
+    }
+
     if (data.action.type === 'file') {
-      const wc = await webcontainer;
-      const fullPath = path.join(wc.workdir, data.action.filePath);
+      const fullPath = path.join(WORK_DIR, data.action.filePath);
 
       /*
        * For scoped locks, we would need to implement diff checking here
@@ -700,9 +844,7 @@ export class WorkbenchStore {
 
       this.#editorStore.updateFile(fullPath, data.action.content);
 
-      if (!isStreaming && data.action.content) {
-        await this.saveFile(fullPath);
-      }
+      // File is already written to sidecar via action runner's onFileWrite callback
 
       if (!isStreaming) {
         await artifact.runner.runAction(data);

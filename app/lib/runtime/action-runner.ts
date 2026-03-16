@@ -1,12 +1,10 @@
-import type { WebContainer } from '@webcontainer/api';
 import { path as nodePath } from '~/utils/path';
 import { WORK_DIR } from '~/utils/constants';
 import { atom, map, type MapStore } from 'nanostores';
-import type { ActionAlert, BoltAction, DeployAlert, FileHistory, SupabaseAction, SupabaseAlert } from '~/types/actions';
+import type { ActionAlert, BoltAction, DeployAlert, SupabaseAction, SupabaseAlert } from '~/types/actions';
 import { createScopedLogger } from '~/utils/logger';
 import { unreachable } from '~/utils/unreachable';
 import type { ActionCallbackData } from './message-parser';
-import type { BoltShell } from '~/utils/shell';
 
 const logger = createScopedLogger('ActionRunner');
 
@@ -66,9 +64,7 @@ class ActionCommandError extends Error {
 }
 
 export class ActionRunner {
-  #webcontainer: Promise<WebContainer>;
   #currentExecutionPromise: Promise<void> = Promise.resolve();
-  #shellTerminal: () => BoltShell;
   runnerId = atom<string>(`${Date.now()}`);
   actions: ActionsMap = map({});
   onAlert?: (alert: ActionAlert) => void;
@@ -77,19 +73,14 @@ export class ActionRunner {
   onFileWrite?: (path: string, content: string) => void;
   onShellExec?: (command: string, onOutput?: (data: string) => void) => Promise<{ exitCode: number; output: string }>;
   onPreviewUrl?: (url: string) => void;
-  coolifyEnabled?: boolean;
   containerReadyPromise?: Promise<unknown>;
   buildOutput?: { path: string; exitCode: number; output: string };
 
   constructor(
-    webcontainerPromise: Promise<WebContainer>,
-    getShellTerminal: () => BoltShell,
     onAlert?: (alert: ActionAlert) => void,
     onSupabaseAlert?: (alert: SupabaseAlert) => void,
     onDeployAlert?: (alert: DeployAlert) => void,
   ) {
-    this.#webcontainer = webcontainerPromise;
-    this.#shellTerminal = getShellTerminal;
     this.onAlert = onAlert;
     this.onSupabaseAlert = onSupabaseAlert;
     this.onDeployAlert = onDeployAlert;
@@ -104,6 +95,33 @@ export class ActionRunner {
     if (action) {
       // action already added
       return;
+    }
+
+    /*
+     * Dedup: skip file actions for paths already seen in this artifact
+     * (don't require a.executed — streaming actions have executed=false)
+     */
+    if (data.action.type === 'file') {
+      const filePath = (data.action as any).filePath;
+      const existingForPath = Object.values(actions).find((a) => a.type === 'file' && (a as any).filePath === filePath);
+
+      if (existingForPath) {
+        logger.debug(`Skipping duplicate file action for ${filePath}`);
+        return;
+      }
+    }
+
+    // Dedup: skip shell/start commands already seen with the same content
+    if (data.action.type === 'shell' || data.action.type === 'start') {
+      const content = (data.action as any).content;
+      const existingCmd = Object.values(actions).find(
+        (a) => (a.type === 'shell' || a.type === 'start') && (a as any).content === content,
+      );
+
+      if (existingCmd) {
+        logger.debug(`Skipping duplicate ${data.action.type} action: ${content?.slice(0, 50)}`);
+        return;
+      }
     }
 
     const abortController = new AbortController();
@@ -129,11 +147,11 @@ export class ActionRunner {
     }
 
     if (action.executed) {
-      return; // No return value here
+      return;
     }
 
     if (isStreaming && action.type !== 'file') {
-      return; // No return value here
+      return;
     }
 
     this.#updateAction(actionId, { ...action, ...data.action, executed: !isStreaming });
@@ -152,8 +170,8 @@ export class ActionRunner {
   }
 
   async #executeAction(actionId: string, isStreaming: boolean = false) {
-    // Wait for Coolify container to be ready before executing any action
-    if (this.coolifyEnabled && this.containerReadyPromise) {
+    // Wait for container to be ready before executing any action
+    if (this.containerReadyPromise) {
       await this.containerReadyPromise;
     }
 
@@ -269,58 +287,30 @@ export class ActionRunner {
     }
 
     // Pre-validate command for common issues
-    const validationResult = await this.#validateShellCommand(action.content);
+    const validationResult = this.#validateShellCommand(action.content);
 
     if (validationResult.shouldModify && validationResult.modifiedCommand) {
       logger.debug(`Modified command: ${action.content} -> ${validationResult.modifiedCommand}`);
       action.content = validationResult.modifiedCommand;
     }
 
-    /*
-     * When Coolify is enabled, route commands exclusively to sidecar.
-     * WebContainer shell can hang on interactive prompts (e.g. npm create vite "Ok to proceed?").
-     */
-    if (this.coolifyEnabled) {
-      logger.debug(`[Coolify] Routing shell command to sidecar: ${action.content}`);
+    logger.debug(`Routing shell command to sidecar: ${action.content}`);
 
-      if (this.onShellExec) {
-        const result = await this.onShellExec(action.content, (data: string) => {
-          if (actionId) {
-            const current = this.actions.get()[actionId];
+    if (this.onShellExec) {
+      const result = await this.onShellExec(action.content, (data: string) => {
+        if (actionId) {
+          const current = this.actions.get()[actionId];
 
-            if (current) {
-              const existing = current.shellOutput || '';
-              this.#updateAction(actionId, { shellOutput: existing + data });
-            }
+          if (current) {
+            const existing = current.shellOutput || '';
+            this.#updateAction(actionId, { shellOutput: existing + data });
           }
-        });
-
-        if (result.exitCode !== 0) {
-          throw new ActionCommandError(`Shell command failed (exit ${result.exitCode})`, result.output);
         }
+      });
+
+      if (result.exitCode !== 0) {
+        throw new ActionCommandError(`Shell command failed (exit ${result.exitCode})`, result.output);
       }
-
-      return;
-    }
-
-    const shell = this.#shellTerminal();
-    await shell.ready();
-
-    if (!shell || !shell.terminal || !shell.process) {
-      unreachable('Shell terminal not found');
-    }
-
-    this.onShellExec?.(action.content);
-
-    const resp = await shell.executeCommand(this.runnerId.get(), action.content, () => {
-      logger.debug(`[${action.type}]:Aborting Action\n\n`, action);
-      action.abort();
-    });
-    logger.debug(`${action.type} Shell Response: [exit code:${resp?.exitCode}]`);
-
-    if (resp?.exitCode != 0) {
-      const enhancedError = this.#createEnhancedShellError(action.content, resp?.exitCode, resp?.output);
-      throw new ActionCommandError(enhancedError.title, enhancedError.details);
     }
   }
 
@@ -329,37 +319,11 @@ export class ActionRunner {
       unreachable('Expected shell action');
     }
 
-    // When Coolify is enabled, route start commands exclusively to sidecar.
-    if (this.coolifyEnabled) {
-      logger.debug(`[Coolify] Routing start command to sidecar: ${action.content}`);
+    logger.debug(`Routing start command to sidecar: ${action.content}`);
 
-      // Start commands are long-running (dev servers) — fire and don't wait for exit
-      if (this.onShellExec) {
-        this.onShellExec(action.content);
-      }
-
-      return;
-    }
-
-    if (!this.#shellTerminal) {
-      unreachable('Shell terminal not found');
-    }
-
-    const shell = this.#shellTerminal();
-    await shell.ready();
-
-    if (!shell || !shell.terminal || !shell.process) {
-      unreachable('Shell terminal not found');
-    }
-
-    const resp = await shell.executeCommand(this.runnerId.get(), action.content, () => {
-      logger.debug(`[${action.type}]:Aborting Action\n\n`, action);
-      action.abort();
-    });
-    logger.debug(`${action.type} Shell Response: [exit code:${resp?.exitCode}]`);
-
-    if (resp?.exitCode != 0) {
-      throw new ActionCommandError('Failed To Start Application', resp?.output || 'No Output Available');
+    // Start commands are long-running (dev servers) — fire and don't wait for exit
+    if (this.onShellExec) {
+      this.onShellExec(action.content);
     }
   }
 
@@ -368,74 +332,16 @@ export class ActionRunner {
       unreachable('Expected file action');
     }
 
-    // In Coolify mode, write directly to sidecar only — skip WebContainer entirely
-    if (this.coolifyEnabled) {
-      const relativePath = nodePath.relative(WORK_DIR, action.filePath);
-      logger.debug(`[Coolify] File written to sidecar only: ${relativePath}`);
-      this.onFileWrite?.(relativePath, action.content);
-
-      return;
-    }
-
-    const webcontainer = await this.#webcontainer;
-    const relativePath = nodePath.relative(webcontainer.workdir, action.filePath);
-
-    let folder = nodePath.dirname(relativePath);
-
-    // remove trailing slashes
-    folder = folder.replace(/\/+$/g, '');
-
-    if (folder !== '.') {
-      try {
-        await webcontainer.fs.mkdir(folder, { recursive: true });
-        logger.debug('Created folder', folder);
-      } catch (error) {
-        logger.error('Failed to create folder\n\n', error);
-      }
-    }
-
-    try {
-      await webcontainer.fs.writeFile(relativePath, action.content);
-      logger.debug(`File written ${relativePath}`);
-      this.onFileWrite?.(relativePath, action.content);
-    } catch (error) {
-      logger.error('Failed to write file\n\n', error);
-    }
+    // Write to sidecar via callback
+    const relativePath = nodePath.relative(WORK_DIR, action.filePath);
+    logger.debug(`File written to sidecar: ${relativePath}`);
+    this.onFileWrite?.(relativePath, action.content);
   }
 
   #updateAction(id: string, newState: ActionStateUpdate) {
     const actions = this.actions.get();
 
     this.actions.setKey(id, { ...actions[id], ...newState });
-  }
-
-  async getFileHistory(filePath: string): Promise<FileHistory | null> {
-    try {
-      const webcontainer = await this.#webcontainer;
-      const historyPath = this.#getHistoryPath(filePath);
-      const content = await webcontainer.fs.readFile(historyPath, 'utf-8');
-
-      return JSON.parse(content);
-    } catch (error) {
-      logger.error('Failed to get file history:', error);
-      return null;
-    }
-  }
-
-  async saveFileHistory(filePath: string, history: FileHistory) {
-    // const webcontainer = await this.#webcontainer;
-    const historyPath = this.#getHistoryPath(filePath);
-
-    await this.#runFileAction({
-      type: 'file',
-      filePath: historyPath,
-      content: JSON.stringify(history),
-      changeSource: 'auto-save',
-    } as any);
-  }
-
-  #getHistoryPath(filePath: string) {
-    return nodePath.join('.history', filePath);
   }
 
   async #runBuildAction(action: ActionState) {
@@ -454,49 +360,35 @@ export class ActionRunner {
       source: 'netlify',
     });
 
-    const webcontainer = await this.#webcontainer;
+    // Run build via sidecar
+    let buildResult = { exitCode: 1, output: 'No shell exec handler available' };
 
-    // Create a new terminal specifically for the build
-    const buildProcess = await webcontainer.spawn('npm', ['run', 'build']);
+    if (this.onShellExec) {
+      buildResult = await this.onShellExec('npm run build');
+    }
 
-    let output = '';
-    const outputPromise = buildProcess.output.pipeTo(
-      new WritableStream({
-        write(data) {
-          output += data;
-        },
-      }),
-    );
-
-    const exitCode = await buildProcess.exit;
-    await outputPromise.catch(() => {
-      // Ignore output piping errors; we still have whatever was captured
-    });
-
-    let buildDir = '';
-
-    if (exitCode !== 0) {
-      const buildResult = {
-        path: buildDir,
-        exitCode,
-        output,
+    if (buildResult.exitCode !== 0) {
+      const result = {
+        path: '',
+        exitCode: buildResult.exitCode,
+        output: buildResult.output,
       };
 
-      this.buildOutput = buildResult;
+      this.buildOutput = result;
 
       // Trigger build failed alert
       this.onDeployAlert?.({
         type: 'error',
         title: 'Build Failed',
         description: 'Your application build failed',
-        content: output || 'No build output available',
+        content: buildResult.output || 'No build output available',
         stage: 'building',
         buildStatus: 'failed',
         deployStatus: 'pending',
         source: 'netlify',
       });
 
-      throw new ActionCommandError('Build Failed', output || 'No Output Available');
+      throw new ActionCommandError('Build Failed', buildResult.output || 'No Output Available');
     }
 
     // Trigger build success alert
@@ -510,36 +402,18 @@ export class ActionRunner {
       source: 'netlify',
     });
 
-    // Check for common build directories
-    const commonBuildDirs = ['dist', 'build', 'out', 'output', '.next', 'public'];
+    // Default build directory
+    const buildDir = `${WORK_DIR}/dist`;
 
-    // Try to find the first existing build directory
-    for (const dir of commonBuildDirs) {
-      const dirPath = nodePath.join(webcontainer.workdir, dir);
-
-      try {
-        await webcontainer.fs.readdir(dirPath);
-        buildDir = dirPath;
-        break;
-      } catch {
-        continue;
-      }
-    }
-
-    // If no build directory was found, use the default (dist)
-    if (!buildDir) {
-      buildDir = nodePath.join(webcontainer.workdir, 'dist');
-    }
-
-    const buildResult = {
+    const result = {
       path: buildDir,
-      exitCode,
-      output,
+      exitCode: buildResult.exitCode,
+      output: buildResult.output,
     };
 
-    this.buildOutput = buildResult;
+    this.buildOutput = result;
 
-    return buildResult;
+    return result;
   }
   async handleSupabaseAction(action: SupabaseAction) {
     const { operation, content, filePath } = action;
@@ -639,96 +513,50 @@ export class ActionRunner {
     });
   }
 
-  async #validateShellCommand(command: string): Promise<{
+  #validateShellCommand(command: string): {
     shouldModify: boolean;
     modifiedCommand?: string;
     warning?: string;
-  }> {
+  } {
     const trimmedCommand = command.trim();
 
-    // Handle rm commands that might fail due to missing files
-    if (trimmedCommand.startsWith('rm ') && !trimmedCommand.includes(' -f')) {
-      const rmMatch = trimmedCommand.match(/^rm\s+(.+)$/);
+    /*
+     * Rewrite scaffold commands that target "." or /app/ to use /tmp/ pattern
+     * Match: composer create-project <package> . [flags...]
+     */
+    const composerDotMatch = trimmedCommand.match(/^(composer\s+create-project\s+\S+)\s+\.\s*(.*?)$/);
 
-      if (rmMatch) {
-        const filePaths = rmMatch[1].split(/\s+/);
+    if (composerDotMatch) {
+      const [, composerCmd, flags] = composerDotMatch;
+      const modifiedCommand =
+        `${composerCmd} /tmp/scaffold-new ${flags} && cp -a /tmp/scaffold-new/. /app/ && rm -rf /tmp/scaffold-new`.replace(
+          /\s+/g,
+          ' ',
+        );
 
-        // Check if any of the files exist using WebContainer
-        try {
-          const webcontainer = await this.#webcontainer;
-          const existingFiles = [];
-
-          for (const filePath of filePaths) {
-            if (filePath.startsWith('-')) {
-              continue;
-            } // Skip flags
-
-            try {
-              await webcontainer.fs.readFile(filePath);
-              existingFiles.push(filePath);
-            } catch {
-              // File doesn't exist, skip it
-            }
-          }
-
-          if (existingFiles.length === 0) {
-            // No files exist, modify command to use -f flag to avoid error
-            return {
-              shouldModify: true,
-              modifiedCommand: `rm -f ${filePaths.join(' ')}`,
-              warning: 'Added -f flag to rm command as target files do not exist',
-            };
-          } else if (existingFiles.length < filePaths.length) {
-            // Some files don't exist, modify to only remove existing ones with -f for safety
-            return {
-              shouldModify: true,
-              modifiedCommand: `rm -f ${filePaths.join(' ')}`,
-              warning: 'Added -f flag to rm command as some target files do not exist',
-            };
-          }
-        } catch (error) {
-          logger.debug('Could not validate rm command files:', error);
-        }
-      }
+      return {
+        shouldModify: true,
+        modifiedCommand,
+        warning: 'Rewrote scaffold command to use /tmp/ pattern (target dir may not be empty)',
+      };
     }
 
-    // Handle cd commands to non-existent directories
-    if (trimmedCommand.startsWith('cd ')) {
-      const cdMatch = trimmedCommand.match(/^cd\s+(.+)$/);
+    // Match: composer create-project <package> /app [flags...] or /app/ or /app/.
+    const composerAppMatch = trimmedCommand.match(/^(composer\s+create-project\s+\S+)\s+\/app\/?\s*(.*?)$/);
 
-      if (cdMatch) {
-        const targetDir = cdMatch[1].trim();
+    if (composerAppMatch) {
+      const [, composerCmd, flags] = composerAppMatch;
+      const modifiedCommand =
+        `${composerCmd} /tmp/scaffold-new ${flags} && cp -a /tmp/scaffold-new/. /app/ && rm -rf /tmp/scaffold-new`.replace(
+          /\s+/g,
+          ' ',
+        );
 
-        try {
-          const webcontainer = await this.#webcontainer;
-          await webcontainer.fs.readdir(targetDir);
-        } catch {
-          return {
-            shouldModify: true,
-            modifiedCommand: `mkdir -p ${targetDir} && cd ${targetDir}`,
-            warning: 'Directory does not exist, created it first',
-          };
-        }
-      }
-    }
-
-    // Handle cp/mv commands with missing source files
-    if (trimmedCommand.match(/^(cp|mv)\s+/)) {
-      const parts = trimmedCommand.split(/\s+/);
-
-      if (parts.length >= 3) {
-        const sourceFile = parts[1];
-
-        try {
-          const webcontainer = await this.#webcontainer;
-          await webcontainer.fs.readFile(sourceFile);
-        } catch {
-          return {
-            shouldModify: false,
-            warning: `Source file '${sourceFile}' does not exist`,
-          };
-        }
-      }
+      return {
+        shouldModify: true,
+        modifiedCommand,
+        warning: 'Rewrote scaffold command to use /tmp/ pattern (target dir may not be empty)',
+      };
     }
 
     return { shouldModify: false };
@@ -781,7 +609,7 @@ export class ActionRunner {
         pattern: /command not found/,
         title: 'Command Not Found',
         getMessage: () =>
-          `The command '${firstWord}' is not available in WebContainer.\n\nSuggestion: Check available commands or use a package manager to install it.`,
+          `The command '${firstWord}' is not available.\n\nSuggestion: Check available commands or install it via apt-get or npm.`,
       },
       {
         pattern: /Is a directory/,

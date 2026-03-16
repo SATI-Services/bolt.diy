@@ -2,8 +2,6 @@ import { toast } from 'react-toastify';
 import { useStore } from '@nanostores/react';
 import { netlifyConnection } from '~/lib/stores/netlify';
 import { workbenchStore } from '~/lib/stores/workbench';
-import { webcontainer } from '~/lib/webcontainer';
-import { path } from '~/utils/path';
 import { useState } from 'react';
 import type { ActionCallbackData } from '~/lib/runtime/message-parser';
 import { chatId } from '~/lib/persistence/useChatHistory';
@@ -80,34 +78,31 @@ export function useNetlifyDeploy() {
       // Notify that build succeeded and deployment is starting
       deployArtifact.runner.handleDeployAction('deploying', 'running', { source: 'netlify' });
 
-      // Get the build files
-      const container = await webcontainer;
+      // Get the build files from the files store
+      const files = workbenchStore.files.get();
+      const fileContents: Record<string, string> = {};
 
       // Remove /home/project from buildPath if it exists
       const buildPath = buildOutput.path.replace('/home/project', '');
 
       console.log('Original buildPath', buildPath);
 
-      // Check if the build path exists
-      let finalBuildPath = buildPath;
-
-      // List of common output directories to check if the specified build path doesn't exist
+      // Check common build directories
       const commonOutputDirs = [buildPath, '/dist', '/build', '/out', '/output', '/.next', '/public'];
-
-      // Verify the build path exists, or try to find an alternative
+      let finalBuildPath = buildPath;
       let buildPathExists = false;
 
       for (const dir of commonOutputDirs) {
-        try {
-          await container.fs.readdir(dir);
+        const fullDir = `/home/project${dir}`;
+
+        // Check if any files exist under this directory
+        const hasFiles = Object.keys(files).some((p) => p.startsWith(fullDir + '/'));
+
+        if (hasFiles) {
           finalBuildPath = dir;
           buildPathExists = true;
           console.log(`Using build directory: ${finalBuildPath}`);
           break;
-        } catch (error) {
-          // Directory doesn't exist, try the next one
-          console.log(`Directory ${dir} doesn't exist, trying next option. ${error}`);
-          continue;
         }
       }
 
@@ -115,29 +110,20 @@ export function useNetlifyDeploy() {
         throw new Error('Could not find build output directory. Please check your build configuration.');
       }
 
-      async function getAllFiles(dirPath: string): Promise<Record<string, string>> {
-        const files: Record<string, string> = {};
-        const entries = await container.fs.readdir(dirPath, { withFileTypes: true });
+      const buildPrefix = `/home/project${finalBuildPath}`;
 
-        for (const entry of entries) {
-          const fullPath = path.join(dirPath, entry.name);
-
-          if (entry.isFile()) {
-            const content = await container.fs.readFile(fullPath, 'utf-8');
-
-            // Remove build path prefix from the path
-            const deployPath = fullPath.replace(finalBuildPath, '');
-            files[deployPath] = content;
-          } else if (entry.isDirectory()) {
-            const subFiles = await getAllFiles(fullPath);
-            Object.assign(files, subFiles);
-          }
+      for (const [filePath, dirent] of Object.entries(files)) {
+        if (!dirent || dirent.type !== 'file' || dirent.isBinary) {
+          continue;
         }
 
-        return files;
-      }
+        if (!filePath.startsWith(buildPrefix + '/')) {
+          continue;
+        }
 
-      const fileContents = await getAllFiles(finalBuildPath);
+        const deployPath = filePath.replace(buildPrefix, '');
+        fileContents[deployPath] = dirent.content;
+      }
 
       // Use chatId instead of artifact.id
       const existingSiteId = localStorage.getItem(`netlify-site-${currentChatId}`);

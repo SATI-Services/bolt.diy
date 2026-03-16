@@ -170,6 +170,48 @@ export class CoolifyFileSyncService {
     }
   }
 
+  async readFile(filePath: string): Promise<{ content: string | null; isBinary: boolean } | null> {
+    if (!this.#connected) {
+      return null;
+    }
+
+    try {
+      const result = (await this.#sidecarFetch('/read', 'POST', { path: filePath })) as {
+        type: string;
+        content: string | null;
+        isBinary?: boolean;
+      };
+
+      if (result.type === 'error') {
+        return null;
+      }
+
+      return { content: result.content, isBinary: result.isBinary || false };
+    } catch (error) {
+      logger.error('Read file failed:', error);
+      return null;
+    }
+  }
+
+  async listFiles(
+    dirPath: string = '.',
+  ): Promise<Record<string, { type: string; size?: number; tooLarge?: boolean }> | null> {
+    if (!this.#connected) {
+      return null;
+    }
+
+    try {
+      const result = (await this.#sidecarFetch('/list-files', 'POST', { path: dirPath })) as {
+        type: string;
+        files: Record<string, { type: string; size?: number; tooLarge?: boolean }>;
+      };
+      return result.files;
+    } catch (error) {
+      logger.error('List files failed:', error);
+      return null;
+    }
+  }
+
   async exec(command: string, onOutput?: (data: string) => void): Promise<{ exitCode: number; output: string }> {
     if (!this.#connected) {
       this.#pendingOps.push({ type: 'exec', command });

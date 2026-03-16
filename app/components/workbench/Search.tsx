@@ -1,7 +1,6 @@
 import { useState, useMemo, useCallback, useEffect } from 'react';
-import type { TextSearchOptions, TextSearchOnProgressCallback, WebContainer } from '@webcontainer/api';
 import { workbenchStore } from '~/lib/stores/workbench';
-import { webcontainer } from '~/lib/webcontainer';
+import { getCoolifyFileSyncService } from '~/lib/services/coolifyFileSyncService';
 import { WORK_DIR } from '~/utils/constants';
 import { debounce } from '~/utils/debounce';
 
@@ -11,66 +10,6 @@ interface DisplayMatch {
   previewText: string;
   matchCharStart: number;
   matchCharEnd: number;
-}
-
-async function performTextSearch(
-  instance: WebContainer,
-  query: string,
-  options: Omit<TextSearchOptions, 'folders'>,
-  onProgress: (results: DisplayMatch[]) => void,
-): Promise<void> {
-  if (!instance || typeof instance.internal?.textSearch !== 'function') {
-    console.error('WebContainer instance not available or internal searchText method is missing/not a function.');
-
-    return;
-  }
-
-  const searchOptions: TextSearchOptions = {
-    ...options,
-    folders: [WORK_DIR],
-  };
-
-  const progressCallback: TextSearchOnProgressCallback = (filePath: any, apiMatches: any[]) => {
-    const displayMatches: DisplayMatch[] = [];
-
-    apiMatches.forEach((apiMatch: { preview: { text: string; matches: string | any[] }; ranges: any[] }) => {
-      const previewLines = apiMatch.preview.text.split('\n');
-
-      apiMatch.ranges.forEach((range: { startLineNumber: number; startColumn: any; endColumn: any }) => {
-        let previewLineText = '(Preview line not found)';
-        let lineIndexInPreview = -1;
-
-        if (apiMatch.preview.matches.length > 0) {
-          const previewStartLine = apiMatch.preview.matches[0].startLineNumber;
-          lineIndexInPreview = range.startLineNumber - previewStartLine;
-        }
-
-        if (lineIndexInPreview >= 0 && lineIndexInPreview < previewLines.length) {
-          previewLineText = previewLines[lineIndexInPreview];
-        } else {
-          previewLineText = previewLines[0] ?? '(Preview unavailable)';
-        }
-
-        displayMatches.push({
-          path: filePath,
-          lineNumber: range.startLineNumber,
-          previewText: previewLineText,
-          matchCharStart: range.startColumn,
-          matchCharEnd: range.endColumn,
-        });
-      });
-    });
-
-    if (displayMatches.length > 0) {
-      onProgress(displayMatches);
-    }
-  };
-
-  try {
-    await instance.internal.textSearch(query, searchOptions, progressCallback);
-  } catch (error) {
-    console.error('Error during internal text search:', error);
-  }
 }
 
 function groupResultsByFile(results: DisplayMatch[]): Record<string, DisplayMatch[]> {
@@ -126,26 +65,54 @@ export function Search() {
     const start = Date.now();
 
     try {
-      const instance = await webcontainer;
-      const options: Omit<TextSearchOptions, 'folders'> = {
-        homeDir: WORK_DIR, // Adjust this path as needed
-        includes: ['**/*.*'],
-        excludes: ['**/node_modules/**', '**/package-lock.json', '**/.git/**', '**/dist/**', '**/*.lock'],
-        gitignore: true,
-        requireGit: false,
-        globalIgnoreFiles: true,
-        ignoreSymlinks: false,
-        resultLimit: 500,
-        isRegex: false,
-        caseSensitive: false,
-        isWordMatch: false,
-      };
+      const syncService = getCoolifyFileSyncService();
 
-      const progressHandler = (batchResults: DisplayMatch[]) => {
-        setSearchResults((prevResults) => [...prevResults, ...batchResults]);
-      };
+      if (!syncService.connected) {
+        setIsSearching(false);
+        return;
+      }
 
-      await performTextSearch(instance, query, options, progressHandler);
+      // Shell-escape the query for grep
+      const escapedQuery = query.replace(/['"\\]/g, '\\$&');
+      const result = await syncService.exec(
+        `grep -rn --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' --include='*.json' --include='*.css' --include='*.html' --include='*.md' --max-count=500 -- "${escapedQuery}" /app 2>/dev/null || true`,
+      );
+
+      if (result.output) {
+        const matches: DisplayMatch[] = result.output
+          .split('\n')
+          .filter(Boolean)
+          .map((line) => {
+            const firstColon = line.indexOf(':');
+            const secondColon = line.indexOf(':', firstColon + 1);
+
+            if (firstColon === -1 || secondColon === -1) {
+              return null;
+            }
+
+            const filePath = line.slice(0, firstColon);
+            const lineNum = parseInt(line.slice(firstColon + 1, secondColon), 10);
+            const content = line.slice(secondColon + 1);
+
+            // Convert absolute path to WORK_DIR-relative path
+            const relativePath = filePath.startsWith('/app/') ? filePath.replace('/app/', '') : filePath;
+            const fullPath = `${WORK_DIR}/${relativePath}`;
+
+            // Find match position in line
+            const matchIdx = content.indexOf(query);
+
+            return {
+              path: fullPath,
+              lineNumber: lineNum,
+              previewText: content,
+              matchCharStart: matchIdx >= 0 ? matchIdx : 0,
+              matchCharEnd: matchIdx >= 0 ? matchIdx + query.length : query.length,
+            };
+          })
+          .filter(Boolean) as DisplayMatch[];
+
+        setSearchResults(matches);
+      }
     } catch (error) {
       console.error('Failed to initiate search:', error);
     } finally {

@@ -83,6 +83,68 @@ function handleDeleteFile(filePath) {
   return { type: 'ok', message: `Deleted: ${filePath}` };
 }
 
+function handleReadFile(filePath) {
+  const fullPath = resolvePath(filePath);
+  if (!fs.existsSync(fullPath)) {
+    return { type: 'error', message: `Not found: ${filePath}` };
+  }
+  const stat = fs.statSync(fullPath);
+  if (stat.isDirectory()) {
+    return { type: 'error', message: `Is a directory: ${filePath}` };
+  }
+  // Skip binary files (check first 512 bytes for null bytes)
+  const buf = Buffer.alloc(512);
+  const fd = fs.openSync(fullPath, 'r');
+  const bytesRead = fs.readSync(fd, buf, 0, 512, 0);
+  fs.closeSync(fd);
+  for (let i = 0; i < bytesRead; i++) {
+    if (buf[i] === 0) {
+      return { type: 'ok', content: null, isBinary: true };
+    }
+  }
+  const content = fs.readFileSync(fullPath, 'utf-8');
+  return { type: 'ok', content, isBinary: false };
+}
+
+function handleListFiles(dirPath, maxDepth = 10) {
+  const IGNORE = new Set([
+    'node_modules', '.git', 'vendor', 'storage', '.cache',
+    '.npm', '.composer', 'dist', 'build', '.next', 'coverage'
+  ]);
+  const files = {};
+
+  function walk(dir, depth) {
+    if (depth > maxDepth) return;
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+
+    for (const entry of entries) {
+      if (IGNORE.has(entry.name)) continue;
+      if (entry.name.startsWith('.') && entry.name !== '.env' && entry.name !== '.env.example') continue;
+
+      const fullPath = path.join(dir, entry.name);
+      const relativePath = path.relative(WORKDIR, fullPath);
+
+      if (entry.isDirectory()) {
+        files[relativePath] = { type: 'folder' };
+        walk(fullPath, depth + 1);
+      } else if (entry.isFile()) {
+        const stat = fs.statSync(fullPath);
+        // Skip files > 1MB
+        if (stat.size > 1024 * 1024) {
+          files[relativePath] = { type: 'file', size: stat.size, tooLarge: true };
+        } else {
+          files[relativePath] = { type: 'file', size: stat.size };
+        }
+      }
+    }
+  }
+
+  const resolved = resolvePath(dirPath || '.');
+  walk(resolved, 0);
+  return { type: 'ok', files };
+}
+
 function execCommand(command) {
   // Close placeholder before exec so the dev server can bind port 3000
   closePlaceholder();
@@ -296,6 +358,81 @@ const httpServer = http.createServer(async (req, res) => {
     return;
   }
 
+  // ---- SSE file watcher (must be handled before body parsing) ----
+  if (req.url === '/watch' && req.method === 'GET') {
+    if (!chokidar) {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      });
+      res.write(`data: ${JSON.stringify({ type: 'error', message: 'chokidar not available' })}\n\n`);
+      res.end();
+      return;
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+    });
+
+    const watcher = chokidar.watch(WORKDIR, {
+      ignored: [
+        '**/node_modules/**',
+        '**/.git/**',
+        '**/dist/**',
+        '**/build/**',
+        '**/.cache/**',
+        '**/.next/**',
+      ],
+      persistent: true,
+      ignoreInitial: true,
+    });
+
+    const sendEvent = (type, filePath, content) => {
+      const relativePath = path.relative(WORKDIR, filePath);
+      const data = { type, path: relativePath };
+      if (content !== undefined) data.content = content;
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    watcher.on('add', (filePath) => {
+      try {
+        const stat = fs.statSync(filePath);
+        if (stat.size < 1024 * 1024) {
+          const content = fs.readFileSync(filePath, 'utf-8');
+          sendEvent('add', filePath, content);
+        } else {
+          sendEvent('add', filePath);
+        }
+      } catch { sendEvent('add', filePath); }
+    });
+
+    watcher.on('change', (filePath) => {
+      try {
+        const stat = fs.statSync(filePath);
+        if (stat.size < 1024 * 1024) {
+          const content = fs.readFileSync(filePath, 'utf-8');
+          sendEvent('change', filePath, content);
+        } else {
+          sendEvent('change', filePath);
+        }
+      } catch { sendEvent('change', filePath); }
+    });
+
+    watcher.on('unlink', (filePath) => sendEvent('unlink', filePath));
+    watcher.on('addDir', (filePath) => sendEvent('addDir', filePath));
+    watcher.on('unlinkDir', (filePath) => sendEvent('unlinkDir', filePath));
+
+    req.on('close', () => {
+      watcher.close();
+    });
+
+    return;
+  }
+
+  // ---- Body-dependent endpoints ----
   const body = await readBody(req);
 
   try {
@@ -354,6 +491,14 @@ const httpServer = http.createServer(async (req, res) => {
       req.on('close', () => {
         proc.kill();
       });
+    } else if (req.url === '/read' && req.method === 'POST') {
+      const result = handleReadFile(body.path);
+      res.writeHead(result.type === 'error' ? 404 : 200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
+    } else if (req.url === '/list-files' && req.method === 'POST') {
+      const result = handleListFiles(body.path || '.', body.maxDepth || 10);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
     } else if (req.url === '/batch' && req.method === 'POST') {
       if (Array.isArray(body.operations)) {
         for (const op of body.operations) {
@@ -366,6 +511,43 @@ const httpServer = http.createServer(async (req, res) => {
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ type: 'ok', message: `Batch: ${(body.operations || []).length} operations` }));
+    } else if (req.url === '/search' && req.method === 'POST') {
+      if (!body?.pattern) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'pattern is required' }));
+        return;
+      }
+
+      const searchResult = await new Promise((resolve) => {
+        const proc = spawn('grep', [
+          '-rn',
+          '--include=*.{ts,tsx,js,jsx,json,css,html,md,py,php,rb}',
+          '--max-count=200',
+          body.pattern,
+          resolvePath(body.path || '.'),
+        ], { cwd: WORKDIR });
+
+        let output = '';
+        proc.stdout.on('data', (d) => { output += d.toString(); });
+        proc.stderr.on('data', () => {});
+        proc.on('close', () => {
+          const matches = output.split('\n').filter(Boolean).map(line => {
+            const firstColon = line.indexOf(':');
+            const secondColon = line.indexOf(':', firstColon + 1);
+            if (firstColon === -1 || secondColon === -1) return null;
+            return {
+              file: path.relative(WORKDIR, line.slice(0, firstColon)),
+              line: parseInt(line.slice(firstColon + 1, secondColon), 10),
+              content: line.slice(secondColon + 1).trim(),
+            };
+          }).filter(Boolean);
+          resolve({ matches });
+        });
+        proc.on('error', () => resolve({ matches: [] }));
+      });
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(searchResult));
     } else {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Not found' }));
@@ -389,6 +571,13 @@ try {
   ptyModule = require('node-pty');
 } catch (e) {
   console.warn('[Sidecar] node-pty not available, terminal endpoint disabled');
+}
+
+let chokidar;
+try {
+  chokidar = require('chokidar');
+} catch (e) {
+  console.warn('[Sidecar] chokidar not available, file watcher endpoint disabled');
 }
 
 const terminalWss = new WebSocketServer({ noServer: true });

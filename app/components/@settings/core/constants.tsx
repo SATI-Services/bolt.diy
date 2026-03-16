@@ -102,7 +102,7 @@ export const DEFAULT_TAB_CONFIG = [
   { id: 'gitlab', visible: true, window: 'user' as const, order: 5 },
   { id: 'netlify', visible: true, window: 'user' as const, order: 6 },
   { id: 'vercel', visible: true, window: 'user' as const, order: 7 },
-  { id: 'supabase', visible: true, window: 'user' as const, order: 8 },
+  { id: 'supabase', visible: false, window: 'user' as const, order: 8 },
   { id: 'notifications', visible: true, window: 'user' as const, order: 9 },
   { id: 'event-logs', visible: true, window: 'user' as const, order: 10 },
   { id: 'mcp', visible: true, window: 'user' as const, order: 11 },

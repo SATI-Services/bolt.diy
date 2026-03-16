@@ -24,26 +24,23 @@ const initialConnection: CoolifyConnection = storedConnection
     };
 
 const defaultSettings: CoolifySettings = {
-  enabled: !!(envUrl && envToken),
   autoProvision: true,
   containerTtl: 60,
   sidecarImage: '10.0.0.1:5000/preview-sidecar:latest',
 };
 
-const initialSettings: CoolifySettings = storedSettings ? JSON.parse(storedSettings) : defaultSettings;
+const initialSettings: CoolifySettings = storedSettings
+  ? JSON.parse(storedSettings)
+  : {
+      ...defaultSettings,
+    };
 
 export const coolifyConnection = atom<CoolifyConnection>(initialConnection);
 export const coolifySettings = atom<CoolifySettings>(initialSettings);
 export const isConnecting = atom<boolean>(false);
 
 // Auto-initialize connection on startup when env vars are configured
-if (
-  typeof window !== 'undefined' &&
-  initialSettings.enabled &&
-  initialConnection.url &&
-  initialConnection.token &&
-  !initialConnection.connected
-) {
+if (typeof window !== 'undefined' && initialConnection.url && initialConnection.token && !initialConnection.connected) {
   setTimeout(async () => {
     try {
       const result = await testConnection({ url: initialConnection.url, token: initialConnection.token });
