@@ -793,7 +793,12 @@ export const ChatImpl = memo(
                       id: m.id,
                       role: m.role === 'execution_result' ? ('assistant' as const) : (m.role as 'user' | 'assistant'),
                       content: m.content,
-                      annotations: m.annotations?.type === 'execution_result' ? ['execution_result'] : undefined,
+                      annotations:
+                        m.annotations?.type === 'tool_call'
+                          ? m.annotations
+                          : m.annotations?.type === 'execution_result'
+                            ? ['execution_result']
+                            : undefined,
                     }) as Message,
                 ),
 

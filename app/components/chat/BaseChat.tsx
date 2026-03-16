@@ -137,7 +137,7 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
       },
       onWebSearchResult,
       agentMode,
-      agentIteration,
+      agentIteration: _agentIteration,
       agentStatus,
       agentCurrentAction,
     },
@@ -462,13 +462,10 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
                   {llmErrorAlert && <LlmErrorAlert alert={llmErrorAlert} clearAlert={() => clearLlmErrorAlert?.()} />}
                 </div>
                 {progressAnnotations && <ProgressCompilation data={progressAnnotations} />}
-                {agentMode && agentStatus === 'running' && agentIteration && (
-                  <div className="flex items-center gap-2 px-4 py-2 text-sm text-bolt-elements-textSecondary bg-bolt-elements-background-depth-2 rounded-lg mb-2">
-                    <div className="i-svg-spinners:ring-resize text-bolt-elements-item-contentAccent" />
-                    <span>
-                      Agent: step {agentIteration.n}/{agentIteration.max}
-                      {agentCurrentAction ? ` — running \`${agentCurrentAction}\`` : ' — thinking...'}
-                    </span>
+                {agentMode && agentStatus === 'running' && (
+                  <div className="flex items-center gap-2 px-3 py-1.5 text-xs text-bolt-elements-textSecondary rounded-lg mb-2">
+                    <div className="i-svg-spinners:ring-resize text-bolt-elements-item-contentAccent text-sm" />
+                    <span className="truncate">{agentCurrentAction || 'Thinking...'}</span>
                   </div>
                 )}
                 <ChatBox

@@ -85,7 +85,7 @@ export function useAgentChat(options: UseAgentChatOptions = {}) {
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [actions, setActions] = useState<AgentAction[]>([]);
   const [status, setStatus] = useState<string>('idle');
-  const [iteration, setIteration] = useState<{ n: number; max: number }>({ n: 0, max: 25 });
+  const [iteration, setIteration] = useState<{ n: number; max: number }>({ n: 0, max: 200 });
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingContent, setStreamingContent] = useState('');
   const [currentAction, setCurrentAction] = useState<string | null>(null);
@@ -150,15 +150,42 @@ export function useAgentChat(options: UseAgentChatOptions = {}) {
           case 'tool-call':
             // Show tool calls inline in chat (like Claude Code / Codex)
             setCurrentAction((data as any).label || (data as any).toolName || null);
-            setMessages((msgs) => [
-              ...msgs,
-              {
-                id: `tool-${Date.now()}`,
-                role: 'execution_result',
-                content: (data as any).label || `${(data as any).toolName}(...)`,
-                annotations: { type: 'tool_call', toolName: (data as any).toolName, args: (data as any).args },
-              },
-            ]);
+
+            /*
+             * Flush any accumulated streaming text BEFORE adding the tool call
+             * This preserves chronological ordering: text appears before its tool calls
+             */
+            setStreamingContent((prev) => {
+              if (prev) {
+                setMessages((msgs) => [
+                  ...msgs,
+                  {
+                    id: `text-${Date.now()}`,
+                    role: 'assistant',
+                    content: prev,
+                  },
+                  {
+                    id: `tool-${Date.now()}`,
+                    role: 'execution_result',
+                    content: (data as any).label || `${(data as any).toolName}(...)`,
+                    annotations: { type: 'tool_call', toolName: (data as any).toolName, args: (data as any).args },
+                  },
+                ]);
+              } else {
+                setMessages((msgs) => [
+                  ...msgs,
+                  {
+                    id: `tool-${Date.now()}`,
+                    role: 'execution_result',
+                    content: (data as any).label || `${(data as any).toolName}(...)`,
+                    annotations: { type: 'tool_call', toolName: (data as any).toolName, args: (data as any).args },
+                  },
+                ]);
+              }
+
+              return '';
+            });
+            setIsStreaming(false);
             break;
 
           case 'tool-result':

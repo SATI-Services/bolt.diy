@@ -67,9 +67,24 @@ export const Messages = forwardRef<HTMLDivElement, MessagesProps>(
                 return <Fragment key={index} />;
               }
 
-              // Inline tool call rendering (Claude Code / Codex style)
+              // Inline tool call rendering (Claude Code style)
               if (isToolCall) {
-                return <ToolCallMessage key={index} content={content} annotations={annotations} isFirst={isFirst} />;
+                // Check if previous message was also a tool call (for tight grouping)
+                const prevIsToolCall =
+                  index > 0 &&
+                  typeof messages[index - 1]?.annotations === 'object' &&
+                  !Array.isArray(messages[index - 1]?.annotations) &&
+                  (messages[index - 1]?.annotations as any)?.type === 'tool_call';
+
+                return (
+                  <ToolCallMessage
+                    key={index}
+                    content={content}
+                    annotations={annotations}
+                    isFirst={isFirst}
+                    grouped={prevIsToolCall}
+                  />
+                );
               }
 
               // Compact rendering for agent execution results
@@ -175,46 +190,104 @@ function ExecutionResultMessage({ content, isFirst }: { content: string; isFirst
   );
 }
 
-// Inline tool call message (Claude Code / Codex style)
-function ToolCallMessage({ content, annotations, isFirst }: { content: string; annotations: any; isFirst: boolean }) {
+// Tool icon lookup
+const TOOL_ICONS: Record<string, string> = {
+  writeFile: 'i-ph:file-plus',
+  editFile: 'i-ph:pencil-simple',
+  readFile: 'i-ph:eye',
+  searchFiles: 'i-ph:magnifying-glass',
+  searchGlob: 'i-ph:file-search',
+  listFiles: 'i-ph:folder-open',
+  deleteFile: 'i-ph:trash',
+  runShell: 'i-ph:terminal',
+  startDevServer: 'i-ph:play',
+  getServerStatus: 'i-ph:heartbeat',
+  batchWrite: 'i-ph:files',
+};
+
+// Shell tools that should show stdout inline
+const SHELL_TOOLS = new Set(['runShell', 'startDevServer']);
+
+// Inline tool call message (Claude Code style — compact, with inline output)
+function ToolCallMessage({
+  content,
+  annotations,
+  isFirst,
+  grouped,
+}: {
+  content: string;
+  annotations: any;
+  isFirst: boolean;
+  grouped: boolean;
+}) {
   const [expanded, setExpanded] = useState(false);
   const resolved = annotations?.resolved;
   const success = annotations?.success;
   const result = annotations?.result;
   const toolName = annotations?.toolName;
 
-  // Icon based on tool type
-  const icon =
-    toolName === 'writeFile'
-      ? 'i-ph:file-text'
-      : toolName === 'readFile'
-        ? 'i-ph:eye'
-        : toolName === 'runShell'
-          ? 'i-ph:terminal'
-          : toolName === 'startDevServer'
-            ? 'i-ph:play'
-            : toolName === 'listFiles'
-              ? 'i-ph:folder-open'
-              : 'i-ph:gear';
+  const icon = TOOL_ICONS[toolName] || 'i-ph:gear';
+  const isShellTool = SHELL_TOOLS.has(toolName);
+  const isFailed = resolved && !success;
 
-  const statusIcon = !resolved
-    ? 'i-svg-spinners:ring-resize'
-    : success
-      ? 'i-ph:check-circle text-bolt-elements-icon-success'
-      : 'i-ph:x-circle text-bolt-elements-button-danger-text';
+  // Auto-expand shell output and failures
+  const hasOutput = result && result.length > 0;
+  const showOutputInline = hasOutput && (isShellTool || isFailed);
+
+  // Truncated output for inline display
+  const inlineOutput = showOutputInline ? result.slice(0, 500) : '';
+  const outputTruncated = showOutputInline && result.length > 500;
 
   return (
-    <div className={classNames('px-4 py-1', { 'mt-1': !isFirst })}>
+    <div className={classNames('pl-4 pr-2', { 'mt-3': !isFirst && !grouped, 'mt-0.5': grouped })}>
+      {/* Tool call label row */}
       <button
-        onClick={() => result && setExpanded(!expanded)}
-        className="flex items-center gap-2 text-sm text-bolt-elements-textSecondary hover:text-bolt-elements-textPrimary transition-colors w-full text-left font-mono"
+        onClick={() => hasOutput && setExpanded(!expanded)}
+        className={classNames(
+          'flex items-center gap-1.5 text-sm w-full text-left transition-colors rounded px-1.5 py-0.5 -ml-1.5',
+          hasOutput ? 'hover:bg-bolt-elements-background-depth-2 cursor-pointer' : 'cursor-default',
+          isFailed ? 'text-bolt-elements-button-danger-text' : 'text-bolt-elements-textSecondary',
+        )}
       >
-        <span className={`${icon} flex-shrink-0`} />
-        <span className={`${statusIcon} flex-shrink-0 text-xs`} />
+        {/* Status indicator */}
+        {!resolved ? (
+          <span className="i-svg-spinners:ring-resize flex-shrink-0 text-xs text-bolt-elements-item-contentAccent" />
+        ) : success ? (
+          <span className="i-ph:check flex-shrink-0 text-xs text-bolt-elements-icon-success" />
+        ) : (
+          <span className="i-ph:x flex-shrink-0 text-xs text-bolt-elements-button-danger-text" />
+        )}
+
+        {/* Tool icon */}
+        <span className={`${icon} flex-shrink-0 text-sm`} />
+
+        {/* Label */}
         <span className="truncate">{content}</span>
+
+        {/* Expand indicator for results */}
+        {hasOutput && !showOutputInline && (
+          <span
+            className={classNames('flex-shrink-0 text-xs ml-auto', expanded ? 'i-ph:caret-up' : 'i-ph:caret-down')}
+          />
+        )}
       </button>
-      {expanded && result && (
-        <pre className="mt-1 ml-7 text-xs font-mono text-bolt-elements-textSecondary bg-bolt-elements-background-depth-3 rounded p-2 max-h-40 overflow-auto whitespace-pre-wrap">
+
+      {/* Inline stdout for shell commands */}
+      {showOutputInline && !expanded && (
+        <pre
+          onClick={() => setExpanded(true)}
+          className="mt-0.5 ml-6 text-xs font-mono text-bolt-elements-textTertiary bg-bolt-elements-background-depth-3 rounded px-2 py-1 max-h-24 overflow-hidden whitespace-pre-wrap cursor-pointer hover:max-h-none"
+        >
+          {inlineOutput}
+          {outputTruncated && (
+            <span className="text-bolt-elements-textSecondary opacity-60">{'\n'}... click to expand</span>
+          )}
+        </pre>
+      )}
+
+      {/* Expanded full output (click to expand on any tool) */}
+      {expanded && hasOutput && (
+        <pre className="mt-0.5 ml-6 text-xs font-mono text-bolt-elements-textTertiary bg-bolt-elements-background-depth-3 rounded px-2 py-1.5 max-h-60 overflow-auto whitespace-pre-wrap">
           {result}
         </pre>
       )}

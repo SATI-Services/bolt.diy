@@ -117,7 +117,7 @@ async function handleCreateSession(req, res) {
     title: body.title || null,
     provider: body.provider || 'Anthropic',
     model: body.model || 'claude-sonnet-4-20250514',
-    maxIterations: body.maxIterations || 25,
+    maxIterations: body.maxIterations || 200,
     containerInfo: container
       ? {
           containerId: container.containerId,

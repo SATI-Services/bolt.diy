@@ -51,7 +51,7 @@ export async function createSession({ id, title, provider, model, containerInfo,
       containerInfo?.domain || null,
       containerInfo?.sidecarUrl || null,
       containerInfo?.token || null,
-      maxIterations || 25,
+      maxIterations || 200,
     ],
   );
   return getSession(sessionId);
