@@ -1,7 +1,5 @@
 import { map } from 'nanostores';
 import type { CoolifyContainerState } from '~/types/coolify';
-import { coolifyConnection, coolifySettings } from './coolify';
-import * as coolifyApi from '~/lib/services/coolifyApiClient';
 import { getCoolifyFileSyncService } from '~/lib/services/coolifyFileSyncService';
 import { createScopedLogger } from '~/utils/logger';
 import { toast } from 'react-toastify';
@@ -48,26 +46,7 @@ export function rekeyContainer(tempId: string, realId: string) {
   logger.debug(`Re-keyed container from ${tempId} to ${realId}`);
 }
 
-function generateToken(): string {
-  const array = new Uint8Array(32);
-  crypto.getRandomValues(array);
-
-  return Array.from(array, (b) => b.toString(16).padStart(2, '0')).join('');
-}
-
-// Generate a unique host port for the sidecar WS (range 10000-19999)
-function generateSidecarPort(): number {
-  return 10000 + Math.floor(Math.random() * 10000);
-}
-
 export async function provisionContainer(chatId: string): Promise<CoolifyContainerState | null> {
-  const connection = coolifyConnection.get();
-  const settings = coolifySettings.get();
-
-  if (!connection.connected) {
-    return null;
-  }
-
   // Check if container already exists for this chat
   const existing = coolifyContainers.get()[chatId];
 
@@ -75,59 +54,35 @@ export async function provisionContainer(chatId: string): Promise<CoolifyContain
     return existing;
   }
 
-  const sidecarToken = generateToken();
-  const sidecarPort = generateSidecarPort();
-  const appName = `bolt-preview-${chatId.slice(0, 8)}-${Date.now().toString(36)}`;
-
-  const toastId = toast.loading('Creating preview container...', { autoClose: false });
+  const toastId = toast.loading('Claiming container from pool...', { autoClose: false });
 
   try {
-    logger.debug(`Provisioning container for chat ${chatId} (sidecar port: ${sidecarPort})`);
+    logger.debug(`Claiming container from pool for chat ${chatId}`);
 
-    const apiOptions = { url: connection.url, token: connection.token };
-
-    // Create the application with host port mapping for sidecar HTTP API
-    const app = await coolifyApi.createApp(apiOptions, {
-      serverUuid: connection.serverUuid,
-      projectUuid: connection.projectUuid,
-      environmentName: connection.environmentName,
-      image: settings.sidecarImage,
-      name: appName,
-      ports: '3000,9838,9839',
-      portsMappings: `${sidecarPort}:9839`,
+    const resp = await fetch('/api/container-pool', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'claim', chatId }),
     });
 
-    // Set sidecar token env var BEFORE starting the app
-    await coolifyApi.setEnvVars(apiOptions, app.uuid, [{ key: 'SIDECAR_TOKEN', value: sidecarToken }]);
-
-    // Set custom domain under our wildcard so Traefik routes it correctly
-    const customDomain = `https://${appName}.bolt.rdrt.org`;
-
-    try {
-      await coolifyApi.updateAppDomain(apiOptions, app.uuid, customDomain);
-    } catch (e) {
-      logger.warn('Failed to set custom domain, using Coolify default:', e);
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ error: 'Pool claim failed' }));
+      throw new Error((err as any).error || `Pool claim failed (${resp.status})`);
     }
 
-    /*
-     * NOTE: startApp is deferred to the polling loop below.
-     * Making 4+ rapid sequential fetch calls to /api/coolify-proxy from the browser
-     * causes workerd to silently drop requests. Starting inside the poll avoids this.
-     */
-
-    /*
-     * Sidecar HTTP API URL — accessed via server-side proxy (/api/sidecar-proxy).
-     * Use localhost because the proxy runs on the same machine as the containers.
-     * Using the external hostname would hit the firewall on random high ports.
-     */
-    const sidecarUrl = `http://localhost:${sidecarPort}`;
+    const { containerId, domain, sidecarUrl, token } = (await resp.json()) as {
+      containerId: string;
+      domain: string;
+      sidecarUrl: string;
+      token: string;
+    };
 
     const containerState: CoolifyContainerState = {
-      appUuid: app.uuid,
-      domain: customDomain,
-      wsUrl: sidecarUrl, // reusing wsUrl field for sidecar HTTP URL
-      sidecarToken,
-      status: 'provisioning',
+      appUuid: containerId,
+      domain: `https://${domain}`,
+      wsUrl: sidecarUrl,
+      sidecarToken: token,
+      status: 'running',
       chatId,
       createdAt: Date.now(),
       lastActivity: Date.now(),
@@ -136,96 +91,18 @@ export async function provisionContainer(chatId: string): Promise<CoolifyContain
     coolifyContainers.setKey(chatId, containerState);
     persistContainers();
 
-    // Poll until running — check sidecar health directly (most reliable)
-    const maxPolls = 30;
-    let polls = 0;
-    let appStarted = false;
+    logger.debug(`Container claimed for chat ${chatId}: ${domain} (sidecar: ${sidecarUrl})`);
+    toast.update(toastId, { render: 'Container is ready', type: 'success', isLoading: false, autoClose: 2000 });
 
-    while (polls < maxPolls) {
-      // Sleep FIRST to give workerd time to recover from the rapid create/env/domain fetches
-      await new Promise((resolve) => setTimeout(resolve, 5000));
-      polls++;
-
-      // Start the app after the first sleep (deferred to avoid workerd fetch-dropping)
-      if (!appStarted) {
-        try {
-          toast.update(toastId, { render: 'Starting container...' });
-          logger.debug(`Starting app ${app.uuid}...`);
-          await coolifyApi.startApp(apiOptions, app.uuid);
-          logger.debug(`Start request sent for ${app.uuid}`);
-          appStarted = true;
-        } catch (e) {
-          logger.error('Failed to start app:', e);
-        }
-
-        continue; // Skip health check this iteration — container just started
-      }
-
-      try {
-        /*
-         * Try reaching sidecar directly — this is the most reliable check
-         * Coolify status can report "exited:unhealthy" even when container is up
-         */
-        let sidecarReachable = false;
-
-        try {
-          const healthResp = await fetch('/api/sidecar-proxy', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              sidecarUrl,
-              token: containerState.sidecarToken,
-              endpoint: '/health',
-              method: 'GET',
-            }),
-          });
-          sidecarReachable = healthResp.ok;
-        } catch {
-          // ignore — container not ready yet
-        }
-
-        if (sidecarReachable) {
-          const updatedState: CoolifyContainerState = {
-            ...containerState,
-            status: 'running',
-            lastActivity: Date.now(),
-          };
-
-          coolifyContainers.setKey(chatId, updatedState);
-          persistContainers();
-
-          logger.debug(`Container running for chat ${chatId}: ${customDomain} (sidecar: ${sidecarUrl})`);
-          toast.update(toastId, { render: 'Container is ready', type: 'success', isLoading: false, autoClose: 3000 });
-
-          return updatedState;
-        }
-
-        toast.update(toastId, { render: `Waiting for container... (${polls}/${maxPolls})` });
-        logger.debug(`Poll ${polls}/${maxPolls}: sidecar not ready yet`);
-      } catch (error) {
-        logger.error('Error polling container status:', error);
-      }
-    }
-
-    // Timeout
-    const timeoutState: CoolifyContainerState = {
-      ...containerState,
-      status: 'error',
-    };
-    coolifyContainers.setKey(chatId, timeoutState);
-    persistContainers();
+    return containerState;
+  } catch (error) {
+    logger.error('Failed to claim container from pool:', error);
     toast.update(toastId, {
-      render: 'Container provisioning timed out',
+      render: `Container claim failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
       type: 'error',
       isLoading: false,
       autoClose: 5000,
     });
-
-    return null;
-  } catch (error) {
-    logger.error('Failed to provision container:', error);
-    toast.dismiss(toastId);
-    toast.error('Failed to provision Coolify container');
 
     return null;
   }
@@ -238,15 +115,17 @@ export async function destroyContainer(chatId: string): Promise<void> {
     return;
   }
 
-  const connection = coolifyConnection.get();
-
   try {
     // Disconnect sync service
     const syncService = getCoolifyFileSyncService();
     syncService.disconnect();
 
-    // Delete the app from Coolify
-    await coolifyApi.deleteApp({ url: connection.url, token: connection.token }, container.appUuid);
+    // Release container back to pool
+    await fetch('/api/container-pool', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'release', containerId: container.appUuid }),
+    });
 
     // Remove from store
     const containers = { ...coolifyContainers.get() };
@@ -254,17 +133,16 @@ export async function destroyContainer(chatId: string): Promise<void> {
     coolifyContainers.set(containers);
     persistContainers();
 
-    logger.debug(`Container destroyed for chat ${chatId}`);
+    logger.debug(`Container released for chat ${chatId}`);
   } catch (error) {
-    logger.error('Failed to destroy container:', error);
+    logger.error('Failed to release container:', error);
   }
 }
 
 export async function cleanupStaleContainers(): Promise<void> {
   const containers = coolifyContainers.get();
-  const settings = coolifySettings.get();
   const now = Date.now();
-  const ttlMs = settings.containerTtl * 60 * 1000;
+  const ttlMs = 60 * 60 * 1000; // 60 minutes default TTL
 
   for (const [chatId, container] of Object.entries(containers)) {
     if (now - container.lastActivity > ttlMs) {
