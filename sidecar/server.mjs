@@ -27,7 +27,7 @@ let targetPort = null; // null = no target yet, show waiting page
 const proxyServer = http.createServer((req, res) => {
   if (!targetPort) {
     res.writeHead(200, { 'Content-Type': 'text/html' });
-    res.end('<html><body style="display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;background:#1a1a2e;color:#e0e0e0"><h2>Waiting for dev server...</h2></body></html>');
+    res.end('<html><head><meta http-equiv="refresh" content="2"></head><body style="display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;background:#1a1a2e;color:#e0e0e0"><h2>Waiting for dev server...</h2></body></html>');
     return;
   }
 

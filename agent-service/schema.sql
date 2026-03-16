@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS messages (
   id          TEXT PRIMARY KEY,
   session_id  TEXT REFERENCES sessions(id) ON DELETE CASCADE,
-  role        TEXT NOT NULL,              -- user | assistant | system | execution_result
+  role        TEXT NOT NULL,              -- user | assistant | system | tool | execution_result
   content     TEXT NOT NULL,
   created_at  TIMESTAMPTZ DEFAULT now(),
   annotations JSONB,

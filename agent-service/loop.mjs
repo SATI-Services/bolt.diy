@@ -664,12 +664,9 @@ export async function runAgentLoop(sessionId) {
     // Build tools bound to this session's sidecar
     const tools = createTools(session, sessionId);
 
-    // Load conversation history from DB
+    // Load conversation history from DB and reconstruct AI SDK message format
     const dbMessages = await getMessages(sessionId);
-    const messages = dbMessages.map((m) => ({
-      role: m.role === 'execution_result' ? 'user' : m.role,
-      content: m.content,
-    }));
+    const messages = reconstructMessages(dbMessages);
 
     // Resolve model
     const modelInstance = await getModelInstance(session.provider, session.model);
@@ -721,17 +718,51 @@ export async function runAgentLoop(sessionId) {
           max: session.max_iterations,
         });
 
-        // Persist assistant message text if present
+        /*
+         * Persist the full step to the DB so multi-turn conversations retain
+         * tool call context. We save:
+         * 1. Assistant text (if any) as a plain message
+         * 2. Assistant tool calls as a message with role 'assistant' and
+         *    annotations.toolCalls containing the structured calls
+         * 3. Tool results as a message with role 'tool' and
+         *    annotations.toolResults containing the structured results
+         *
+         * On reload, reconstructMessages() rebuilds the AI SDK format.
+         */
         if (text) {
           await saveMessage(sessionId, { role: 'assistant', content: text });
         }
 
-        // Persist tool calls and results
         if (toolCalls?.length) {
-          for (let i = 0; i < toolCalls.length; i++) {
-            const tc = toolCalls[i];
-            const tr = toolResults?.[i];
+          // Save the assistant's tool call message
+          const serializedCalls = toolCalls.map((tc) => ({
+            toolCallId: tc.toolCallId,
+            toolName: tc.toolName,
+            args: tc.args,
+          }));
+          await saveMessage(sessionId, {
+            role: 'assistant',
+            content: text || '',
+            annotations: { type: 'tool_calls', toolCalls: serializedCalls },
+          });
 
+          // Save each tool result as a separate 'tool' message
+          if (toolResults?.length) {
+            for (const tr of toolResults) {
+              await saveMessage(sessionId, {
+                role: 'tool',
+                content: typeof tr.result === 'string' ? tr.result : JSON.stringify(tr.result),
+                annotations: {
+                  type: 'tool_result',
+                  toolCallId: tr.toolCallId,
+                  toolName: tr.toolName,
+                },
+              });
+            }
+          }
+
+          // Also save to actions table for the UI
+          for (const tc of toolCalls) {
             const fileTools = ['writeFile', 'editFile', 'readFile', 'deleteFile', 'batchWrite'];
             const actionType = fileTools.includes(tc.toolName) ? 'file'
               : tc.toolName === 'startDevServer' ? 'start'
@@ -901,6 +932,97 @@ export async function runAgentLoop(sessionId) {
   } finally {
     activeLoops.delete(sessionId);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Message reconstruction — convert DB rows into AI SDK message format
+// ---------------------------------------------------------------------------
+
+/**
+ * Rebuild conversation messages from flat DB rows into the structured format
+ * the Vercel AI SDK expects for multi-turn tool use conversations.
+ *
+ * DB rows come in three flavors:
+ * - role='user'      content=text         → plain user message
+ * - role='assistant'  annotations.type='tool_calls' → assistant with tool_use parts
+ * - role='assistant'  (no annotations)    → plain assistant text
+ * - role='tool'       annotations.type='tool_result' → tool result
+ *
+ * AI SDK expects:
+ * - { role: 'user', content: 'text' }
+ * - { role: 'assistant', content: [{ type: 'text', text }, { type: 'tool-call', ... }] }
+ * - { role: 'tool', content: [{ type: 'tool-result', ... }] }
+ */
+function reconstructMessages(dbMessages) {
+  const messages = [];
+  let i = 0;
+
+  while (i < dbMessages.length) {
+    const msg = dbMessages[i];
+    const ann = typeof msg.annotations === 'string' ? JSON.parse(msg.annotations) : msg.annotations;
+
+    if (msg.role === 'user') {
+      messages.push({ role: 'user', content: msg.content });
+      i++;
+    } else if (msg.role === 'assistant' && ann?.type === 'tool_calls') {
+      // Reconstruct assistant message with tool-call parts
+      const parts = [];
+
+      if (msg.content) {
+        parts.push({ type: 'text', text: msg.content });
+      }
+
+      for (const tc of ann.toolCalls) {
+        parts.push({
+          type: 'tool-call',
+          toolCallId: tc.toolCallId,
+          toolName: tc.toolName,
+          args: tc.args,
+        });
+      }
+
+      messages.push({ role: 'assistant', content: parts });
+
+      // Collect following tool result messages
+      const toolResults = [];
+      let j = i + 1;
+
+      while (j < dbMessages.length) {
+        const next = dbMessages[j];
+        const nextAnn = typeof next.annotations === 'string' ? JSON.parse(next.annotations) : next.annotations;
+
+        if (next.role === 'tool' && nextAnn?.type === 'tool_result') {
+          toolResults.push({
+            type: 'tool-result',
+            toolCallId: nextAnn.toolCallId,
+            toolName: nextAnn.toolName,
+            result: next.content,
+          });
+          j++;
+        } else {
+          break;
+        }
+      }
+
+      if (toolResults.length > 0) {
+        messages.push({ role: 'tool', content: toolResults });
+      }
+
+      i = j;
+    } else if (msg.role === 'assistant') {
+      messages.push({ role: 'assistant', content: msg.content });
+      i++;
+    } else if (msg.role === 'tool') {
+      // Orphaned tool result (shouldn't happen normally) — skip
+      i++;
+    } else {
+      // execution_result or system — map to user for safety
+      messages.push({ role: 'user', content: msg.content });
+      i++;
+    }
+  }
+
+  return messages;
 }
 
 // ---------------------------------------------------------------------------
