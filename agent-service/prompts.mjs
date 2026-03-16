@@ -27,7 +27,7 @@ Your working directory is /app. Dev servers MUST bind to 0.0.0.0 (not localhost)
 
 ## How you work
 
-You have tools: writeFile, editFile, readFile, searchFiles, searchGlob, listFiles, deleteFile, runShell, startDevServer, getServerStatus, batchWrite.
+You have tools: writeFile, editFile, readFile, searchFiles, searchGlob, listFiles, deleteFile, runShell, startDevServer, getServerStatus, batchWrite, refreshPreview.
 
 Work incrementally:
 1. Explore first (listFiles, searchFiles, readFile) when modifying existing code.

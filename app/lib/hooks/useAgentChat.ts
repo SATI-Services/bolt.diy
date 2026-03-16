@@ -56,6 +56,7 @@ export type SSEEvent =
   | { type: 'action-start'; action: AgentAction }
   | { type: 'action-complete'; result: AgentAction & { exitCode?: number; output?: string } }
   | { type: 'execution-feedback'; results: any[] }
+  | { type: 'refresh-preview' }
   | { type: 'compacting' }
   | { type: 'iteration'; n: number; max: number }
   | { type: 'status'; status: string }
@@ -66,6 +67,7 @@ export interface UseAgentChatOptions {
   sessionId?: string;
   onActionStart?: (action: AgentAction) => void;
   onActionComplete?: (result: AgentAction) => void;
+  onRefreshPreview?: () => void;
   onDone?: (reason: string) => void;
   onError?: (error: string) => void;
 }
@@ -77,7 +79,7 @@ export interface UseAgentChatOptions {
  */
 
 export function useAgentChat(options: UseAgentChatOptions = {}) {
-  const { sessionId: initialSessionId, onActionStart, onActionComplete, onDone, onError } = options;
+  const { sessionId: initialSessionId, onActionStart, onActionComplete, onRefreshPreview, onDone, onError } = options;
 
   const [sessionId, _setSessionId] = useState<string | null>(initialSessionId || null);
   const sessionIdRef = useRef<string | null>(initialSessionId || null);
@@ -98,12 +100,12 @@ export function useAgentChat(options: UseAgentChatOptions = {}) {
   const [error, setError] = useState<string | null>(null);
 
   const eventSourceRef = useRef<EventSource | null>(null);
-  const callbackRefs = useRef({ onActionStart, onActionComplete, onDone, onError });
+  const callbackRefs = useRef({ onActionStart, onActionComplete, onRefreshPreview, onDone, onError });
 
   // Keep callback refs in sync
   useEffect(() => {
-    callbackRefs.current = { onActionStart, onActionComplete, onDone, onError };
-  }, [onActionStart, onActionComplete, onDone, onError]);
+    callbackRefs.current = { onActionStart, onActionComplete, onRefreshPreview, onDone, onError };
+  }, [onActionStart, onActionComplete, onRefreshPreview, onDone, onError]);
 
   /*
    * ---------------------------------------------------------------------------
@@ -245,6 +247,10 @@ export function useAgentChat(options: UseAgentChatOptions = {}) {
             break;
 
           case 'execution-feedback':
+            break;
+
+          case 'refresh-preview':
+            callbackRefs.current.onRefreshPreview?.();
             break;
 
           case 'iteration':

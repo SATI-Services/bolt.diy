@@ -571,6 +571,19 @@ function createTools(session, sessionId) {
         }
       },
     }),
+
+    refreshPreview: tool({
+      description:
+        'Reload the preview iframe in the user\'s browser. ' +
+        'Call this after making changes that should be visible in the preview (file edits, config changes, build completion). ' +
+        'File edits auto-refresh, but use this after shell commands that affect the output (e.g. npm run build).',
+      parameters: z.object({}),
+      execute: async () => {
+        emitSSE(sessionId, { type: 'refresh-preview' });
+
+        return 'Preview refresh triggered.';
+      },
+    }),
   };
 }
 
@@ -1063,6 +1076,8 @@ function formatToolCallLabel(toolName, args) {
       return 'Check server status';
     case 'batchWrite':
       return `Write ${args.files?.length || 0} files`;
+    case 'refreshPreview':
+      return 'Refresh preview';
     default:
       return `${toolName}(${JSON.stringify(args).slice(0, 60)})`;
   }

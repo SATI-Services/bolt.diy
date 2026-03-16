@@ -214,6 +214,18 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
     }
   };
 
+  /*
+   * Auto-reload preview when the agent edits files or explicitly triggers a refresh.
+   * The refresh token is bumped by workbenchStore.refreshPreview().
+   */
+  const refreshToken = useStore(workbenchStore.previewRefreshToken);
+
+  useEffect(() => {
+    if (refreshToken > 0 && iframeRef.current) {
+      iframeRef.current.src = iframeRef.current.src;
+    }
+  }, [refreshToken]);
+
   const toggleFullscreen = async () => {
     if (!isFullscreen && containerRef.current) {
       await containerRef.current.requestFullscreen();

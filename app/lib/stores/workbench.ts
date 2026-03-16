@@ -57,6 +57,7 @@ export class WorkbenchStore {
     import.meta.hot?.data.supabaseAlert ?? atom<SupabaseAlert | undefined>(undefined);
   deployAlert: WritableAtom<DeployAlert | undefined> =
     import.meta.hot?.data.deployAlert ?? atom<DeployAlert | undefined>(undefined);
+  previewRefreshToken: WritableAtom<number> = atom(0);
   modifiedFiles = new Set<string>();
   artifactIdList: string[] = [];
   #globalExecutionQueue = Promise.resolve();
@@ -704,6 +705,9 @@ export class WorkbenchStore {
           isBinary: false,
         });
       }
+
+      // Auto-refresh preview after file edits so changes appear immediately
+      this.refreshPreview();
     }
 
     // Sync full file tree from container after shell commands (e.g. cp, scaffold, install)
@@ -712,6 +716,14 @@ export class WorkbenchStore {
         console.warn('File tree sync after agent shell action failed:', err);
       });
     }
+  }
+
+  /**
+   * Trigger a preview iframe reload by bumping the refresh token.
+   * Called after file edits or explicitly via the agent's refreshPreview tool.
+   */
+  refreshPreview() {
+    this.previewRefreshToken.set(this.previewRefreshToken.get() + 1);
   }
 
   /**

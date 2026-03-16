@@ -147,6 +147,9 @@ export const ChatImpl = memo(
       onActionComplete: (result) => {
         workbenchStore.handleAgentActionComplete(result);
       },
+      onRefreshPreview: () => {
+        workbenchStore.refreshPreview();
+      },
       onDone: (reason) => {
         logger.info('Agent loop done', { reason });
       },
