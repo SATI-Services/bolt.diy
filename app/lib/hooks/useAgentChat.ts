@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createScopedLogger } from '~/utils/logger';
+import { coolifyContainers } from '~/lib/stores/coolifyPreview';
 
 const logger = createScopedLogger('useAgentChat');
 
@@ -37,6 +38,10 @@ export interface AgentSessionState {
     provider?: string;
     model?: string;
     containerDomain?: string;
+    container_domain?: string;
+    container_id?: string;
+    sidecar_url?: string;
+    sidecar_token?: string;
   } | null;
   messages: AgentMessage[];
   actions: AgentAction[];
@@ -296,12 +301,39 @@ export function useAgentChat(options: UseAgentChatOptions = {}) {
           throw new Error('Failed to create session');
         }
 
-        const session = (await resp.json()) as { id: string };
+        const session = (await resp.json()) as {
+          id: string;
+          sidecar_url?: string;
+          sidecar_token?: string;
+          container_domain?: string;
+          container_id?: string;
+        };
         setSessionId(session.id);
         setMessages([]);
         setActions([]);
         setStatus('idle');
         setError(null);
+
+        // Bridge container info to coolifyContainers so terminal + preview can find it
+        if (session.sidecar_url && session.sidecar_token) {
+          const wsUrl = session.sidecar_url.replace('host.docker.internal', '127.0.0.1');
+
+          coolifyContainers.setKey(session.id, {
+            appUuid: session.container_id || session.id,
+            domain: session.container_domain ? `https://${session.container_domain}` : '',
+            wsUrl,
+            sidecarToken: session.sidecar_token,
+            status: 'running',
+            chatId: session.id,
+            createdAt: Date.now(),
+            lastActivity: Date.now(),
+          });
+
+          // Persist to localStorage for recovery across reloads
+          if (typeof window !== 'undefined') {
+            localStorage.setItem('coolify_containers', JSON.stringify(coolifyContainers.get()));
+          }
+        }
 
         // Connect SSE
         connectSSE(session.id);
@@ -330,6 +362,26 @@ export function useAgentChat(options: UseAgentChatOptions = {}) {
           setSessionId(state.session.id);
           setStatus(state.session.status);
           setIteration({ n: state.session.iteration, max: state.session.maxIterations });
+
+          // Bridge container info for terminal + preview
+          if (state.session.sidecar_url && state.session.sidecar_token) {
+            const wsUrl = state.session.sidecar_url.replace('host.docker.internal', '127.0.0.1');
+
+            coolifyContainers.setKey(state.session.id, {
+              appUuid: state.session.container_id || state.session.id,
+              domain: state.session.container_domain ? `https://${state.session.container_domain}` : '',
+              wsUrl,
+              sidecarToken: state.session.sidecar_token,
+              status: 'running',
+              chatId: state.session.id,
+              createdAt: Date.now(),
+              lastActivity: Date.now(),
+            });
+
+            if (typeof window !== 'undefined') {
+              localStorage.setItem('coolify_containers', JSON.stringify(coolifyContainers.get()));
+            }
+          }
         }
 
         setMessages(state.messages || []);
