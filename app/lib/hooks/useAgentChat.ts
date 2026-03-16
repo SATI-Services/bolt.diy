@@ -51,6 +51,7 @@ export type SSEEvent =
   | { type: 'action-start'; action: AgentAction }
   | { type: 'action-complete'; result: AgentAction & { exitCode?: number; output?: string } }
   | { type: 'execution-feedback'; results: any[] }
+  | { type: 'compacting' }
   | { type: 'iteration'; n: number; max: number }
   | { type: 'status'; status: string }
   | { type: 'done'; reason: string }
@@ -225,6 +226,17 @@ export function useAgentChat(options: UseAgentChatOptions = {}) {
             setCurrentAction(null);
             setActions((prev) => prev.map((a) => (a.id === data.result.id ? { ...a, ...data.result } : a)));
             callbackRefs.current.onActionComplete?.(data.result);
+            break;
+
+          case 'compacting':
+            setMessages((msgs) => [
+              ...msgs,
+              {
+                id: `compact-${Date.now()}`,
+                role: 'assistant',
+                content: '_Compacting conversation..._',
+              },
+            ]);
             break;
 
           case 'execution-feedback':

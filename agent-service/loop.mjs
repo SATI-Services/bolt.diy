@@ -24,7 +24,7 @@ import {
   upsertFile,
   deleteFileRecord,
 } from './db.mjs';
-import { getModelInstance, getMaxTokens, isReasoningModel } from './llm.mjs';
+import { getModelInstance, getMaxTokens, isReasoningModel, getContextWindowSize } from './llm.mjs';
 import { getAgentSystemPrompt } from './prompts.mjs';
 
 // ---------------------------------------------------------------------------
@@ -562,6 +562,65 @@ function createTools(session, sessionId) {
 }
 
 // ---------------------------------------------------------------------------
+// Conversation compaction — summarize older messages to free context space
+// ---------------------------------------------------------------------------
+
+async function compactConversation(sessionId) {
+  const dbMessages = await getMessages(sessionId);
+
+  if (dbMessages.length < 6) {
+    return; // Not enough messages to compact
+  }
+
+  // Keep the first user message and last 4 messages intact
+  const toSummarize = dbMessages.slice(1, -4);
+  const kept = [dbMessages[0], ...dbMessages.slice(-4)];
+
+  if (toSummarize.length < 4) {
+    return; // Not worth compacting
+  }
+
+  log('info', 'Compacting conversation', { sessionId, summarizing: toSummarize.length, keeping: kept.length });
+  emitSSE(sessionId, { type: 'compacting' });
+
+  // Build a summary of the compacted messages
+  const summaryParts = [];
+
+  for (const m of toSummarize) {
+    if (m.role === 'assistant' && m.content?.length > 20) {
+      summaryParts.push(`Assistant: ${m.content.slice(0, 200)}`);
+    } else if (m.role === 'user') {
+      summaryParts.push(`User: ${m.content.slice(0, 100)}`);
+    }
+  }
+
+  const summaryText =
+    '[Conversation compacted. Summary of earlier work:\n' +
+    summaryParts.join('\n') +
+    '\n...end of summary. Continue from the most recent messages below.]';
+
+  // Delete old messages and insert summary
+  const { pool } = await import('./db.mjs');
+  const idsToDelete = toSummarize.map((m) => m.id);
+
+  if (idsToDelete.length > 0) {
+    await pool.query(
+      `DELETE FROM messages WHERE id = ANY($1::uuid[])`,
+      [idsToDelete],
+    );
+  }
+
+  // Insert the summary as a system message right after the first user message
+  await saveMessage(sessionId, { role: 'assistant', content: summaryText });
+
+  log('info', 'Compaction complete', {
+    sessionId,
+    deleted: idsToDelete.length,
+    summaryLength: summaryText.length,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Main agent loop — uses AI SDK streamText with maxSteps
 // ---------------------------------------------------------------------------
 
@@ -582,6 +641,9 @@ export async function runAgentLoop(sessionId) {
     return;
   }
 
+  // Track whether we need to restart after compaction
+  let needsCompactionRestart = false;
+
   await updateSession(sessionId, { status: 'running' });
   emitSSE(sessionId, { type: 'status', status: 'running' });
 
@@ -601,6 +663,8 @@ export async function runAgentLoop(sessionId) {
     const maxTokens = getMaxTokens(session.model);
     const reasoning = isReasoningModel(session.model);
     const tokenParams = reasoning ? { maxCompletionTokens: maxTokens } : { maxTokens };
+    const contextWindow = await getContextWindowSize(session.model);
+    const compactionThreshold = Math.floor(contextWindow * 0.85);
 
     // System prompt (tool-focused, no XML instructions)
     const systemPrompt = getAgentSystemPrompt();
@@ -610,6 +674,8 @@ export async function runAgentLoop(sessionId) {
       provider: session.provider,
       model: session.model,
       maxSteps: session.max_iterations,
+      contextWindow,
+      compactionThreshold,
     });
 
     // Single streamText call with maxSteps — the AI SDK handles the
@@ -633,6 +699,7 @@ export async function runAgentLoop(sessionId) {
           finishReason,
           toolCallCount: toolCalls?.length || 0,
           tokens: usage?.totalTokens,
+          promptTokens: usage?.promptTokens,
         });
 
         emitSSE(sessionId, {
@@ -674,10 +741,17 @@ export async function runAgentLoop(sessionId) {
           session = await getSession(sessionId);
         }
 
-        // Token budget safety check
-        if (session.total_tokens > 500000) {
-          log('warn', 'Token budget exceeded', { sessionId, tokens: session.total_tokens });
+        // Context window compaction check — abort and restart with compacted history
+        if (usage?.promptTokens && usage.promptTokens > compactionThreshold) {
+          log('info', 'Prompt tokens approaching context limit, triggering compaction', {
+            sessionId,
+            promptTokens: usage.promptTokens,
+            threshold: compactionThreshold,
+            contextWindow,
+          });
+          needsCompactionRestart = true;
           controller.abort();
+          return;
         }
       },
     });
@@ -780,6 +854,27 @@ export async function runAgentLoop(sessionId) {
     emitSSE(sessionId, { type: 'done', reason: 'complete' });
   } catch (err) {
     if (controller.signal.aborted) {
+      // Check if this was a compaction-triggered abort
+      if (needsCompactionRestart) {
+        log('info', 'Restarting loop after compaction', { sessionId });
+
+        try {
+          await compactConversation(sessionId);
+        } catch (compactErr) {
+          log('error', 'Compaction failed', { sessionId, error: compactErr.message });
+        }
+
+        // Clean up and restart
+        activeLoops.delete(sessionId);
+
+        // Brief pause then restart the loop with compacted messages
+        await sleep(500);
+        runAgentLoop(sessionId).catch((restartErr) => {
+          log('error', 'Restart after compaction failed', { sessionId, error: restartErr.message });
+        });
+        return;
+      }
+
       await updateSession(sessionId, { status: 'paused' }).catch(() => {});
       emitSSE(sessionId, { type: 'status', status: 'paused' });
       emitSSE(sessionId, { type: 'done', reason: 'aborted' });

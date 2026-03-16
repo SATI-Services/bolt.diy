@@ -115,3 +115,85 @@ export function isReasoningModel(modelId) {
   const name = (modelId || '').toLowerCase();
   return name.includes('o1') || name.includes('o3') || name.includes('gpt-5');
 }
+
+// ---------------------------------------------------------------------------
+// Context window size — fetched from OpenRouter, cached, with static fallback
+// ---------------------------------------------------------------------------
+
+const _contextWindowCache = new Map();
+let _orModelsCache = null;
+let _orModelsFetchedAt = 0;
+
+const STATIC_CONTEXT_WINDOWS = {
+  'claude-opus-4': 1000000,
+  'claude-sonnet-4': 200000,
+  'claude-haiku-4': 200000,
+  'claude-3.5': 200000,
+  'gpt-4o': 128000,
+  'gpt-4.1': 1000000,
+  'gpt-5': 200000,
+  'o3': 200000,
+  'o1': 200000,
+  'gemini-2': 1000000,
+  'gemini-1.5': 1000000,
+  'deepseek': 128000,
+};
+
+async function fetchOpenRouterModels() {
+  // Cache for 1 hour
+  if (_orModelsCache && Date.now() - _orModelsFetchedAt < 3600000) {
+    return _orModelsCache;
+  }
+
+  try {
+    const resp = await fetch('https://openrouter.ai/api/v1/models', {
+      headers: process.env.OPEN_ROUTER_API_KEY
+        ? { Authorization: `Bearer ${process.env.OPEN_ROUTER_API_KEY}` }
+        : {},
+    });
+
+    if (!resp.ok) return null;
+
+    const data = await resp.json();
+    _orModelsCache = data?.data || [];
+    _orModelsFetchedAt = Date.now();
+    return _orModelsCache;
+  } catch {
+    return null;
+  }
+}
+
+export async function getContextWindowSize(modelId) {
+  if (!modelId) return 128000;
+
+  // Check cache first
+  if (_contextWindowCache.has(modelId)) {
+    return _contextWindowCache.get(modelId);
+  }
+
+  // Try OpenRouter API (covers all models they support)
+  const models = await fetchOpenRouterModels();
+
+  if (models) {
+    const match = models.find((m) => m.id === modelId || modelId.includes(m.id) || m.id.includes(modelId));
+
+    if (match?.context_length) {
+      _contextWindowCache.set(modelId, match.context_length);
+      return match.context_length;
+    }
+  }
+
+  // Fall back to static lookup
+  const name = modelId.toLowerCase();
+
+  for (const [key, size] of Object.entries(STATIC_CONTEXT_WINDOWS)) {
+    if (name.includes(key)) {
+      _contextWindowCache.set(modelId, size);
+      return size;
+    }
+  }
+
+  const defaultSize = 128000;
+  _contextWindowCache.set(modelId, defaultSize);
+  return defaultSize;
+}
