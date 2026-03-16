@@ -126,6 +126,7 @@ async function createContainer() {
         '9839/tcp': {},
       },
       HostConfig: {
+        NetworkMode: 'coolify',
         PortBindings: {
           '3000/tcp': [{ HostPort: '0' }], // let Docker pick a port for app
           '9839/tcp': [{ HostPort: String(sidecarPort) }],
