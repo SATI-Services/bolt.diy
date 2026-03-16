@@ -310,6 +310,23 @@ ${value.content}
         setUrlId(urlId);
       }
 
+      /*
+       * Agent mode: no artifacts, but we still need a urlId for the sidebar.
+       * Generate one from the description or a unique prefix.
+       */
+      if (!_urlId && !firstArtifact?.id && description.get()) {
+        const descSlug = description
+          .get()!
+          .slice(0, 30)
+          .replace(/[^a-zA-Z0-9]+/g, '-')
+          .replace(/-+$/, '');
+        const slug = `msg-${descSlug}`;
+        const generatedUrlId = await getUrlId(db, slug);
+        _urlId = generatedUrlId;
+        navigateChat(generatedUrlId);
+        setUrlId(generatedUrlId);
+      }
+
       let chatSummary: string | undefined = undefined;
       const lastMessage = messages[messages.length - 1];
 
