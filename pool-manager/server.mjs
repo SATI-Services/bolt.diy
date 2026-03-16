@@ -427,13 +427,16 @@ async function shutdown(signal) {
     log('info', 'HTTP server closed');
   });
 
-  // Destroy all managed containers
-  const ids = [...pool.keys()];
-  log('info', 'Destroying all managed containers', { count: ids.length });
+  // Only destroy WARM (unclaimed) containers on shutdown.
+  // Active containers belong to sessions and must survive pool manager restarts.
+  const warmIds = [...pool.entries()].filter(([, e]) => e.status === 'warm').map(([id]) => id);
+  const activeIds = [...pool.entries()].filter(([, e]) => e.status === 'active').map(([id]) => id);
 
-  await Promise.allSettled(ids.map((id) => destroyContainer(id)));
+  log('info', 'Destroying warm containers, preserving active', { warm: warmIds.length, active: activeIds.length });
 
-  log('info', 'All containers destroyed, exiting');
+  await Promise.allSettled(warmIds.map((id) => destroyContainer(id)));
+
+  log('info', 'Shutdown complete, active containers preserved', { preserved: activeIds });
   process.exit(0);
 }
 
@@ -456,7 +459,7 @@ process.on('uncaughtException', (err) => {
 // ---------------------------------------------------------------------------
 
 async function cleanupOrphans() {
-  log('info', 'Cleaning up orphaned containers...');
+  log('info', 'Discovering containers from previous runs...');
 
   try {
     const containers = await docker.listContainers({
@@ -465,24 +468,62 @@ async function cleanupOrphans() {
     });
 
     const knownIds = new Set(pool.keys());
+    let adopted = 0;
     let cleaned = 0;
 
     for (const containerInfo of containers) {
       const shortId = containerInfo.Labels?.['bolt.pool.id'];
 
-      // If this container is not in our in-memory pool, it's an orphan
-      if (!shortId || !knownIds.has(shortId)) {
-        const name = containerInfo.Names?.[0]?.replace(/^\//, '') || containerInfo.Id.slice(0, 12);
-        log('info', 'Removing orphaned container', { name, id: containerInfo.Id.slice(0, 12) });
+      if (!shortId || knownIds.has(shortId)) {
+        continue;
+      }
+
+      const name = containerInfo.Names?.[0]?.replace(/^\//, '') || containerInfo.Id.slice(0, 12);
+
+      /*
+       * Running containers from previous runs may be serving active sessions.
+       * Adopt them as 'active' so they're preserved. Only destroy stopped ones.
+       */
+      if (containerInfo.State === 'running') {
+        // Find the sidecar port from the port bindings
+        const portBindings = containerInfo.Ports || [];
+        const sidecarBinding = portBindings.find((p) => p.PrivatePort === 9839 && p.PublicPort);
+        const sidecarPort = sidecarBinding?.PublicPort;
+
+        if (sidecarPort) {
+          const domain = `${shortId}.${CONFIG.domainSuffix}`;
+          const entry = {
+            id: shortId,
+            containerId: containerInfo.Id,
+            domain,
+            sidecarUrl: `http://127.0.0.1:${sidecarPort}`,
+            sidecarPort,
+            token: '', // Unknown — but active containers auth via the session's stored token
+            status: 'active',
+            createdAt: containerInfo.Created ? new Date(containerInfo.Created * 1000).toISOString() : new Date().toISOString(),
+          };
+          pool.set(shortId, entry);
+          allocatedPorts.add(sidecarPort);
+          adopted++;
+          log('info', 'Adopted running container', { name, sidecarPort, domain });
+        } else {
+          log('warn', 'Running container has no sidecar port, destroying', { name });
+
+          try {
+            const container = docker.getContainer(containerInfo.Id);
+            await container.stop({ t: 5 }).catch(() => {});
+            await container.remove({ force: true });
+            cleaned++;
+          } catch (err) {
+            log('warn', 'Failed to remove orphan', { name, error: err.message });
+          }
+        }
+      } else {
+        // Stopped container — safe to remove
+        log('info', 'Removing stopped orphan', { name });
 
         try {
-          const container = docker.getContainer(containerInfo.Id);
-
-          if (containerInfo.State === 'running') {
-            await container.stop({ t: 5 }).catch(() => {});
-          }
-
-          await container.remove({ force: true });
+          await docker.getContainer(containerInfo.Id).remove({ force: true });
           cleaned++;
         } catch (err) {
           log('warn', 'Failed to remove orphan', { name, error: err.message });
@@ -490,7 +531,7 @@ async function cleanupOrphans() {
       }
     }
 
-    log('info', 'Orphan cleanup complete', { found: containers.length, cleaned });
+    log('info', 'Orphan cleanup complete', { found: containers.length, adopted, cleaned });
   } catch (err) {
     log('error', 'Orphan cleanup failed', { error: err.message });
   }
