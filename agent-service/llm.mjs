@@ -1,7 +1,7 @@
-// LLM calling module — wraps Vercel AI SDK for the agent service.
-// Supports Anthropic, OpenAI, and Google providers.
-
-import { streamText as aiStreamText, generateText as aiGenerateText } from 'ai';
+/*
+ * LLM provider module — resolves provider + model into an AI SDK model instance.
+ * Used by loop.mjs which calls streamText directly with native tools.
+ */
 
 // ---------------------------------------------------------------------------
 // Provider setup — lazy-loaded to avoid import errors when keys are missing
@@ -19,21 +19,36 @@ async function getProviders() {
     _providers.anthropic = createAnthropic({
       apiKey: process.env.ANTHROPIC_API_KEY,
     });
-  } catch { /* provider not available */ }
+  } catch {
+    /* provider not available */
+  }
 
   try {
     const { createOpenAI } = await import('@ai-sdk/openai');
+
+    // OpenRouter uses the OpenAI-compatible API
+    if (process.env.OPEN_ROUTER_API_KEY) {
+      _providers.openrouter = createOpenAI({
+        apiKey: process.env.OPEN_ROUTER_API_KEY,
+        baseURL: 'https://openrouter.ai/api/v1',
+      });
+    }
+
     _providers.openai = createOpenAI({
       apiKey: process.env.OPENAI_API_KEY,
     });
-  } catch { /* provider not available */ }
+  } catch {
+    /* provider not available */
+  }
 
   try {
     const { createGoogleGenerativeAI } = await import('@ai-sdk/google');
     _providers.google = createGoogleGenerativeAI({
       apiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY,
     });
-  } catch { /* provider not available */ }
+  } catch {
+    /* provider not available */
+  }
 
   return _providers;
 }
@@ -46,12 +61,18 @@ const PROVIDER_MODEL_MAP = {
   Anthropic: { sdk: 'anthropic', defaultModel: 'claude-sonnet-4-20250514' },
   OpenAI: { sdk: 'openai', defaultModel: 'gpt-4o' },
   Google: { sdk: 'google', defaultModel: 'gemini-2.0-flash' },
+  OpenRouter: { sdk: 'openrouter', defaultModel: 'anthropic/claude-opus-4-6' },
 };
 
 function resolveModel(providerName, modelName) {
   const mapping = PROVIDER_MODEL_MAP[providerName];
 
   if (!mapping) {
+    // Fall back to OpenRouter for unknown providers (most models available there)
+    if (_providers?.openrouter) {
+      return { sdkName: 'openrouter', modelId: modelName || 'anthropic/claude-opus-4-6' };
+    }
+
     throw new Error(`Unsupported provider: ${providerName}`);
   }
 
@@ -61,7 +82,7 @@ function resolveModel(providerName, modelName) {
   };
 }
 
-async function getModelInstance(providerName, modelName) {
+export async function getModelInstance(providerName, modelName) {
   const providers = await getProviders();
   const { sdkName, modelId } = resolveModel(providerName, modelName);
   const provider = providers[sdkName];
@@ -74,10 +95,10 @@ async function getModelInstance(providerName, modelName) {
 }
 
 // ---------------------------------------------------------------------------
-// Token limit helpers
+// Token limit helpers (exported for use by loop.mjs)
 // ---------------------------------------------------------------------------
 
-function getMaxTokens(modelId) {
+export function getMaxTokens(modelId) {
   const name = (modelId || '').toLowerCase();
 
   if (name.includes('claude') && name.includes('opus')) return 32000;
@@ -90,59 +111,7 @@ function getMaxTokens(modelId) {
   return 16384;
 }
 
-function isReasoningModel(modelId) {
+export function isReasoningModel(modelId) {
   const name = (modelId || '').toLowerCase();
   return name.includes('o1') || name.includes('o3') || name.includes('gpt-5');
-}
-
-// ---------------------------------------------------------------------------
-// Streaming LLM call
-// ---------------------------------------------------------------------------
-
-/**
- * Stream an LLM response.
- * @param {Object} opts
- * @param {string} opts.provider - Provider name (e.g. 'Anthropic')
- * @param {string} opts.model - Model name/ID
- * @param {string} opts.system - System prompt
- * @param {Array} opts.messages - Array of { role, content } messages
- * @param {AbortSignal} [opts.abortSignal]
- * @returns {AsyncIterable} AI SDK stream result
- */
-export async function streamLLM({ provider, model, system, messages, abortSignal }) {
-  const modelInstance = await getModelInstance(provider, model);
-  const maxTokens = getMaxTokens(model);
-  const reasoning = isReasoningModel(model);
-
-  const tokenParams = reasoning
-    ? { maxCompletionTokens: maxTokens }
-    : { maxTokens };
-
-  const result = await aiStreamText({
-    model: modelInstance,
-    system,
-    messages,
-    ...tokenParams,
-    ...(reasoning ? { temperature: 1 } : {}),
-    abortSignal,
-  });
-
-  return result;
-}
-
-/**
- * Non-streaming LLM call (for simple operations like title generation).
- */
-export async function generateLLM({ provider, model, system, messages }) {
-  const modelInstance = await getModelInstance(provider, model);
-  const maxTokens = getMaxTokens(model);
-
-  const result = await aiGenerateText({
-    model: modelInstance,
-    system,
-    messages,
-    maxTokens: Math.min(maxTokens, 200),
-  });
-
-  return result;
 }
