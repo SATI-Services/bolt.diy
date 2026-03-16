@@ -100,11 +100,13 @@ async function createContainer() {
     [`traefik.http.routers.${shortId}.rule`]: `Host(\`${domain}\`) && !PathPrefix(\`/_sidecar\`)`,
     [`traefik.http.routers.${shortId}.tls`]: 'true',
     [`traefik.http.routers.${shortId}.tls.certresolver`]: 'letsencrypt',
+    [`traefik.http.routers.${shortId}.service`]: `${shortId}`,
     [`traefik.http.services.${shortId}.loadbalancer.server.port`]: '3000',
     // Sidecar router (port 9839) — exposes sidecar HTTP API + terminal WebSocket at /_sidecar/
     [`traefik.http.routers.${shortId}-sidecar.rule`]: `Host(\`${domain}\`) && PathPrefix(\`/_sidecar\`)`,
     [`traefik.http.routers.${shortId}-sidecar.tls`]: 'true',
     [`traefik.http.routers.${shortId}-sidecar.tls.certresolver`]: 'letsencrypt',
+    [`traefik.http.routers.${shortId}-sidecar.service`]: `${shortId}-sidecar`,
     [`traefik.http.services.${shortId}-sidecar.loadbalancer.server.port`]: '9839',
     [`traefik.http.middlewares.${shortId}-sidecar-strip.stripprefix.prefixes`]: '/_sidecar',
     [`traefik.http.routers.${shortId}-sidecar.middlewares`]: `${shortId}-sidecar-strip`,
