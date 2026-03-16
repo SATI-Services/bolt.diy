@@ -71,7 +71,15 @@ export interface UseAgentChatOptions {
 export function useAgentChat(options: UseAgentChatOptions = {}) {
   const { sessionId: initialSessionId, onActionStart, onActionComplete, onDone, onError } = options;
 
-  const [sessionId, setSessionId] = useState<string | null>(initialSessionId || null);
+  const [sessionId, _setSessionId] = useState<string | null>(initialSessionId || null);
+  const sessionIdRef = useRef<string | null>(initialSessionId || null);
+
+  // Wrapper that updates both state (for re-renders) and ref (for sync access in callbacks)
+  const setSessionId = useCallback((id: string | null) => {
+    sessionIdRef.current = id;
+    _setSessionId(id);
+  }, []);
+
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [actions, setActions] = useState<AgentAction[]>([]);
   const [status, setStatus] = useState<string>('idle');
@@ -277,7 +285,9 @@ export function useAgentChat(options: UseAgentChatOptions = {}) {
 
   const sendMessage = useCallback(
     async (content: string, opts?: { provider?: string; model?: string }) => {
-      if (!sessionId) {
+      const sid = sessionIdRef.current;
+
+      if (!sid) {
         throw new Error('No active session');
       }
 
@@ -293,11 +303,11 @@ export function useAgentChat(options: UseAgentChatOptions = {}) {
 
       // Connect SSE if not connected
       if (!eventSourceRef.current || eventSourceRef.current.readyState === EventSource.CLOSED) {
-        connectSSE(sessionId);
+        connectSSE(sid);
       }
 
       try {
-        const resp = await fetch(`/api/agent-session/${sessionId}`, {
+        const resp = await fetch(`/api/agent-session/${sid}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -317,7 +327,7 @@ export function useAgentChat(options: UseAgentChatOptions = {}) {
         throw err;
       }
     },
-    [sessionId, connectSSE],
+    [connectSSE],
   );
 
   /*
@@ -327,12 +337,14 @@ export function useAgentChat(options: UseAgentChatOptions = {}) {
    */
 
   const stop = useCallback(async () => {
-    if (!sessionId) {
+    const sid = sessionIdRef.current;
+
+    if (!sid) {
       return;
     }
 
     try {
-      await fetch(`/api/agent-session/${sessionId}`, {
+      await fetch(`/api/agent-session/${sid}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'stop' }),
@@ -341,7 +353,7 @@ export function useAgentChat(options: UseAgentChatOptions = {}) {
     } catch (err: any) {
       logger.error('Failed to stop agent', err);
     }
-  }, [sessionId]);
+  }, []);
 
   /*
    * ---------------------------------------------------------------------------
