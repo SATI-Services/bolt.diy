@@ -56,12 +56,12 @@ export const Messages = forwardRef<HTMLDivElement, MessagesProps>(
               const { role, content, id: messageId, annotations, parts } = message;
               const isUserMessage = role === 'user';
               const isFirst = index === 0;
-              const isHidden = annotations?.includes('hidden');
-              const isExecutionResult = annotations?.includes('execution_result');
               const isToolCall =
                 typeof annotations === 'object' &&
                 !Array.isArray(annotations) &&
                 (annotations as any)?.type === 'tool_call';
+              const isHidden = Array.isArray(annotations) && annotations.includes('hidden');
+              const isExecutionResult = Array.isArray(annotations) && annotations.includes('execution_result');
 
               if (isHidden) {
                 return <Fragment key={index} />;

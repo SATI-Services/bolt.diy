@@ -6,6 +6,7 @@ import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'react-toastify';
 import { useMessageParser, usePromptEnhancer, useShortcuts } from '~/lib/hooks';
 import { chatId, description, useChatHistory } from '~/lib/persistence';
+import { description as descriptionAtom } from '~/lib/persistence/useChatHistory';
 import { chatStore } from '~/lib/stores/chat';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, PROMPT_COOKIE_KEY, PROVIDER_LIST } from '~/utils/constants';
@@ -246,6 +247,29 @@ export const ChatImpl = memo(
         storeMessageHistory,
       });
     }, [messages, isLoading, parseMessages]);
+
+    // Agent mode: persist messages to IndexedDB so chats survive refresh and show in sidebar
+    useEffect(() => {
+      if (!agentMode || agentChat.messages.length === 0) {
+        return;
+      }
+
+      // Convert agent messages to Message format for persistence (strip tool_call annotations)
+      const persistableMessages: Message[] = agentChat.messages.map(
+        (m) =>
+          ({
+            id: m.id,
+            role: m.role === 'execution_result' ? ('assistant' as const) : (m.role as 'user' | 'assistant'),
+            content: m.content,
+          }) as Message,
+      );
+
+      if (persistableMessages.length > initialMessages.length) {
+        storeMessageHistory(persistableMessages).catch((error) => {
+          console.error('Failed to persist agent messages:', error);
+        });
+      }
+    }, [agentChat.messages, agentChat.messages.length]);
 
     // Warn before navigating away during generation
     useEffect(() => {
@@ -493,6 +517,11 @@ export const ChatImpl = memo(
               title: messageContent.slice(0, 100),
             };
             await agentChat.createSession(sessionOpts);
+
+            // Set description for sidebar display
+            if (!descriptionAtom.get()) {
+              descriptionAtom.set(messageContent.slice(0, 100));
+            }
           }
 
           // Send message via agent service
